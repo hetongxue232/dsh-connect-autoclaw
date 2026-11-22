@@ -205,6 +205,34 @@ function sendJson(res, status, body) {
   res.end(text)
 }
 
+/**
+ * Report a failure that happened AFTER the 200 headers were committed.
+ *
+ * The status line is gone by then, so the only channel left is the body. A
+ * plain `res.destroy()` closes the connection, which an OpenAI-compatible
+ * client reads as a transport fault and may retry — the wrong response to an
+ * upstream that has already told us what went wrong. An in-stream error frame
+ * is the shape those clients DO understand (`data: {"error":{...}}` makes the
+ * openai SDK raise APIError carrying `error.message`), so the real reason
+ * survives to the classifier instead of becoming a generic disconnect.
+ *
+ * Non-streaming answers get the same frame: a JSON body that was cut short is
+ * not valid JSON either, and an error object is the more useful thing to hand
+ * a reader that will fail on it regardless.
+ *
+ * `[DONE]` is never appended — it asserts the answer finished, which is the
+ * one thing this path knows to be untrue.
+ */
+function writeStreamError(res, error) {
+  if (res.destroyed || res.writableEnded) return
+  const message = String(error?.message ?? error) || 'upstream stream failed'
+  const payload = JSON.stringify({
+    error: { message, type: 'upstream_error', code: 'stream_failed' },
+  })
+  res.write(`data: ${payload}\n\n`)
+  res.end()
+}
+
 /** An OpenAI-shaped error body, keeping the vendor's own message. */
 function sendOpenAiError(res, status, type, message, code) {
   sendJson(res, status, {
@@ -401,9 +429,27 @@ export function createShim(options = {}) {
             res.end()
             return
           }
+          // Once 200 headers are committed an HTTP status is no longer
+          // available, but the body is still open and an OpenAI-compatible
+          // reader DOES understand a failure frame there: `data:
+          // {"error":{...}}` raises APIError in the openai SDK, and the kernel
+          // classifies from `error.message`. Closing the socket instead (what
+          // this used to do) reads as TRANSPORT - a class a caller may
+          // legitimately retry, against the very same failed account.
+          //
+          // Deliberately no `[DONE]` after the frame: that sentinel means the
+          // answer finished, and a client watching only for it would take a
+          // truncated turn as complete.
           await new Promise((resolve) => {
             const stream = Readable.fromWeb(upstream.body)
-            stream.on('error', () => { if (!res.destroyed) res.destroy(); resolve() })
+            stream.on('error', (error) => {
+              writeStreamError(res, error)
+              options.onAccountOutcome?.(credential.accountId, {
+                kind: 'network', status: 0, message: String(error?.message ?? error),
+              })
+              options.logger?.warn?.(`dsh-connect-autoclaw: upstream stream failed mid-answer: ${String(error?.message ?? error)}`)
+              resolve()
+            })
             stream.on('end', resolve)
             stream.pipe(res)
           })
