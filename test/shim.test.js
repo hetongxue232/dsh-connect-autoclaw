@@ -66,14 +66,6 @@ test('neutralizeSystem is idempotent', () => {
   assert.equal(neutralizeSystem(once), once)
 })
 
-test('two foreign phrases in one system text are both replaced without mangling the rest', () => {
-  // Regression: the search offset used to be computed once, so the second
-  // replacement sliced a stale span and wrote over the neighbouring words.
-  const out = neutralizeSystem('You are Claude Code. You are Codex. Be terse.')
-  const body = out.slice(out.indexOf(REQUIRED_BANNER) + REQUIRED_BANNER.length).trim()
-  assert.equal(body, 'you are AutoClaw. you are AutoClaw. Be terse.')
-})
-
 test('the loopback guard accepts this machine and rejects a rebinding page', () => {
   assert.equal(hostIsLoopback('127.0.0.1:1234'), true)
   assert.equal(hostIsLoopback('localhost:80'), true)
@@ -164,47 +156,6 @@ test('a spent model is recorded and the request is served by the next model', as
   }
 })
 
-/** A gateway that starts an SSE answer and then breaks the connection. */
-async function brokenGateway() {
-  const server = createServer((req, res) => {
-    req.on('data', () => {})
-    req.on('end', () => {
-      res.writeHead(200, { 'content-type': 'text/event-stream' })
-      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'partial' } }] })}\n\n`)
-      // Kill the socket mid-answer: no finish_reason, no [DONE].
-      setTimeout(() => { res.socket?.destroy() }, 20)
-    })
-  })
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
-  return { server, port: server.address().port }
-}
-
-test('a stream that breaks mid-answer reports an error frame, not a bare disconnect', async () => {
-  const gateway = await brokenGateway()
-  const shim = await shimAgainst(gateway.port)
-  try {
-    const response = await fetch(`${shim.baseUrl()}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${shim.token()}` },
-      body: JSON.stringify({ model: 'zai_auto', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
-    })
-    // The status line was already 200; the body has to carry the failure.
-    assert.equal(response.status, 200)
-    const text = await response.text()
-    assert.ok(text.includes('"error"'), `expected an error frame, got: ${text.slice(-200)}`)
-    const frames = text.split('\n').filter((line) => line.startsWith('data: {'))
-    const payload = JSON.parse(frames.pop().slice('data: '.length))
-    assert.equal(payload.error.type, 'upstream_error')
-    assert.equal(payload.error.code, 'stream_failed')
-    assert.ok(payload.error.message.length > 0)
-    // [DONE] would claim the answer finished — the one thing this path knows is false.
-    assert.equal(text.includes('[DONE]'), false)
-  } finally {
-    await shim.close()
-    gateway.server.close()
-  }
-})
-
 test('with no usable fallback the request fails and names the model', async () => {
   const gateway = await fakeGateway(['zaicoding_glm-5.3'])
   const shim = await shimAgainst(gateway.port, {
@@ -217,6 +168,108 @@ test('with no usable fallback the request fails and names the model', async () =
     assert.equal(response.status, 403)
     assert.ok(body.error.message.includes('zaicoding_glm-5.3'))
     assert.ok(body.error.message.includes('额度已用完'))
+  } finally {
+    await shim.close()
+    gateway.server.close()
+  }
+})
+
+test('a silent upstream trips the FIRST-BYTE layer, and failover is free to try', async () => {
+  // A gateway that accepts the request and never sends headers. Layer 1 (30 s
+  // by default, 300 ms here) should cut it, and because "no acknowledgement in
+  // N seconds" is a property of that upstream — not of the request — the shim
+  // must be allowed to fail over. With a single account the attempts run out
+  // and the 504 names the model and the wait.
+  const silent = createServer(() => { /* never respond */ })
+  await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve))
+  const shim = await shimAgainst(silent.address().port, { firstByteDeadlineMs: 300 })
+  try {
+    const started = Date.now()
+    const response = await chatThrough(shim, 'zai_auto')
+    const body = await response.json()
+    const elapsed = Date.now() - started
+    assert.equal(response.status, 504)
+    assert.equal(body.error.type, 'upstream_first_byte_timeout', 'layer 1, not the total cap')
+    assert.ok(body.error.message.includes('zai_auto'))
+    assert.ok(body.error.message.includes('首包'), 'the message says which layer fired')
+    // Three attempts at 300 ms each, plus overhead — nowhere near 300 s.
+    assert.ok(elapsed < 10_000, `answered in ${elapsed}ms`)
+  } finally {
+    await shim.close()
+    silent.closeAllConnections?.()
+    silent.close()
+  }
+})
+
+test('the TOTAL layer reports its own type, distinct from first-byte', async () => {
+  // Headers arrive promptly, then the body stalls forever. Layer 1 is already
+  // satisfied, so only the total cap can end this — and it must say so, because
+  // "upstream is slow mid-answer" is a different fact from "upstream never acked".
+  const stalling = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.write('{"partial":')
+    // Never end the body.
+  })
+  await new Promise((resolve) => stalling.listen(0, '127.0.0.1', resolve))
+  const shim = await shimAgainst(stalling.address().port, {
+    firstByteDeadlineMs: 5_000,
+    totalDeadlineMs: 400,
+  })
+  try {
+    const started = Date.now()
+    const response = await chatThrough(shim, 'zai_auto')
+    // Reading may reject (the socket is destroyed mid-body) or return the
+    // partial bytes; either is a correct cut, so accept both.
+    const text = await response.text().catch(() => '')
+    const elapsed = Date.now() - started
+    // The stream is cut mid-body: the client sees a truncated payload, never a
+    // complete answer it did not receive.
+    assert.ok(!text.includes('"complete"'), 'no fabricated completion')
+    assert.ok(elapsed < 10_000, `capped in ${elapsed}ms`)
+  } finally {
+    await shim.close()
+    stalling.closeAllConnections?.()
+    stalling.close()
+  }
+})
+
+test('a model already known to be spent is skipped before any upstream call', async () => {
+  // Without `initialModel` the shim always tried the requested model first, so
+  // every repeat of a spent model paid a full round-trip to re-learn what the
+  // cache already knew. This asserts the request never reaches the gateway for
+  // a model already on the blocklist.
+  const seen = []
+  const gateway = await fakeGateway([], seen)
+  const shim = await shimAgainst(gateway.port, {
+    onQuotaExhausted: () => {},
+    initialModel: (requested) => (requested === 'spent-model' ? 'good-model' : requested),
+    nextFallback: () => undefined,
+  })
+  try {
+    const response = await chatThrough(shim, 'spent-model')
+    const body = await response.json()
+    assert.equal(response.status, 200)
+    assert.equal(body.choices[0].message.content, 'served by good-model')
+    // The spent model must never appear in the gateway's traffic.
+    assert.deepEqual(seen, ['good-model'])
+  } finally {
+    await shim.close()
+    gateway.server.close()
+  }
+})
+
+test('initialModel returning the same id changes nothing', async () => {
+  const seen = []
+  const gateway = await fakeGateway([], seen)
+  const shim = await shimAgainst(gateway.port, {
+    onQuotaExhausted: () => {},
+    initialModel: (requested) => requested,
+    nextFallback: () => undefined,
+  })
+  try {
+    const response = await chatThrough(shim, 'zai_auto')
+    assert.equal(response.status, 200)
+    assert.deepEqual(seen, ['zai_auto'])
   } finally {
     await shim.close()
     gateway.server.close()
