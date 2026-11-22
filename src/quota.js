@@ -91,11 +91,17 @@ export function pruneQuota(store, now = Date.now(), ttlMs = QUOTA_TTL_MS) {
  * @param {string} [options.preferred] - the configured fallback (Auto)
  * @param {Map<string, QuotaVerdict> | Record<string, QuotaVerdict>} [options.quota]
  * @param {boolean} [options.allowFallback] - false disables every hop after the first
+ * @param {Set<string>|string[]} [options.demoted] - models on a rate/server
+ *   cooldown (see model-health.js); skipped like an exhausted one
  * @param {number} [options.now]
  * @returns {string[]} at least the requested model, even when it is exhausted —
  *   a caller that turned fallback off must still get upstream's own answer
  */
-export function fallbackChain({ model, catalog = [], preferred, quota, allowFallback = true, now = Date.now() }) {
+export function fallbackChain({ model, catalog = [], preferred, quota, demoted, allowFallback = true, now = Date.now() }) {
+  const demotedSet = demoted instanceof Set ? demoted : new Set(demoted ?? [])
+  // A model is unavailable when its allowance is gone OR it is cooling down
+  // from rate/server failures. Both mean "do not spend a request on it now".
+  const unavailable = (candidate) => isQuotaExhausted(quota ?? {}, candidate, now) || demotedSet.has(candidate)
   const asked = typeof model === 'string' && model !== '' ? model : ''
   if (!allowFallback) return asked === '' ? [] : [asked]
 
@@ -110,11 +116,11 @@ export function fallbackChain({ model, catalog = [], preferred, quota, allowFall
   // The configured fallback wins when the requested model cannot serve: Auto is
   // the gateway's own router and is the most likely thing to work next.
   if (asked !== '') {
-    add(preferred !== undefined && preferred !== asked && !isQuotaExhausted(quota ?? {}, preferred, now) ? preferred : undefined)
+    add(preferred !== undefined && preferred !== asked && !unavailable(preferred) ? preferred : undefined)
     add(asked)
   }
   for (const candidate of catalog) {
-    if (isQuotaExhausted(quota ?? {}, candidate, now)) continue
+    if (unavailable(candidate)) continue
     add(candidate)
   }
   // A model that is the only option still gets its single attempt.
@@ -136,18 +142,29 @@ export function fallbackChain({ model, catalog = [], preferred, quota, allowFall
  * @param {number} [options.now]
  * @param {(name: string) => string} [options.suffix] - decoration applied to an exhausted row's name
  */
-export function annotateCatalog(catalog, { quota, now = Date.now(), suffix = (name) => `${name} · 额度已用完` } = {}) {
+export function annotateCatalog(catalog, {
+  quota,
+  demoted,
+  now = Date.now(),
+  suffix = (name) => `${name} · 额度已用完`,
+  demotedSuffix = (name) => `${name} · 暂时不可用`,
+} = {}) {
   if (!Array.isArray(catalog)) return []
+  const demotedSet = demoted instanceof Set ? demoted : new Set(demoted ?? [])
   return catalog.map((row) => {
     if (row === null || typeof row !== 'object') return row
     const exhausted = isQuotaExhausted(quota ?? {}, row.id, now)
+    // Exhausted (allowance gone) and demoted (cooling down) are different facts
+    // with different fixes, so they keep different labels.
+    const cooling = !exhausted && demotedSet.has(row.id)
     const name = typeof row.name === 'string' && row.name !== '' ? row.name : row.id
     return {
       ...row,
       // Always materialize `name`: the picker's label is `model.name`, and a
       // row without one would render as an empty line.
-      name: exhausted ? suffix(name) : name,
+      name: exhausted ? suffix(name) : cooling ? demotedSuffix(name) : name,
       quotaExhausted: exhausted,
+      modelDemoted: cooling,
     }
   })
 }
