@@ -1,0 +1,104 @@
+{
+  "label": "optimized concurrency=4",
+  "concurrency": 4,
+  "environment": {
+    "model": "zai_auto",
+    "stream": true,
+    "upstream": "https://autoglm-api.zhipuai.cn"
+  },
+  "summary": {
+    "samples": 12,
+    "ok": 12,
+    "ttfbP50": 1293,
+    "ttfbP90": 2414,
+    "throughputPerSec": 0.54,
+    "timeoutRate": 0,
+    "errorRate": 0
+  },
+  "rows": [
+    {
+      "ttfbMs": 949.9048329999999,
+      "totalMs": 2211.826708,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1906.7070829999998,
+      "totalMs": 4348.177208,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 2414.4595000000004,
+      "totalMs": 3647.7375420000003,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1277.779792,
+      "totalMs": 7743.836792,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 2204.215333,
+      "totalMs": 2750.9974999999995,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 950.5587089999999,
+      "totalMs": 1784.380959000001,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1292.5895409999994,
+      "totalMs": 2631.022500000001,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1997.7301659999994,
+      "totalMs": 8443.264833,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1455.8141250000008,
+      "totalMs": 2455.3571250000023,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1160.2165409999998,
+      "totalMs": 2249.0968330000014,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 719.2179160000014,
+      "totalMs": 2078.543458,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 3823.302916999999,
+      "totalMs": 6181.358917,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    }
+  ]
+}
