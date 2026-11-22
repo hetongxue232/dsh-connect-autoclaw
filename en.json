@@ -1,7 +1,0 @@
-{
-  "meta": {
-    "title": "atuoclaw",
-    "description": "Turn the points on this machine's logged-in AutoClaw (Zhipu zwork) desktop app into a DSH model provider: install it and pick an atuoclaw model in the picker, with no key or URL to enter. Also shows the points balance and expiry notice.",
-    "detail": "docs/DETAIL.md"
-  }
-}
