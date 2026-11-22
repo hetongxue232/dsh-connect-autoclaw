@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "atuoclaw",
+    "description": "把本机 AutoClaw（智谱 zwork）桌面版已登录的积分额度接成 DSH 的模型 provider：装好即可在模型选择器里选 atuoclaw 的模型，无需填写 Key 或地址；同时显示积分余额与到期提醒。",
+    "detail": "docs/DETAIL.md"
+  }
+}

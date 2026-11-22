@@ -1,0 +1,19 @@
+# Registers the AutoClaw integration.
+#
+# Two things ride on this row: a model provider route (`atuoclaw`) backed by a
+# loopback shim, and the read-only points routes the composer card reads.
+#
+# The provider is optional at runtime — a profile without the `llm` service
+# still gets the readout instead of failing to load.
+- insert:
+    - id: dsh-connect-autoclaw
+      name: dsh-connect-autoclaw
+      config:
+        # Gateway the AutoClaw app itself talks to (from its own bundle).
+        baseURL: https://autoglm-api.zhipuai.cn
+        # Seconds a wallet answer is reused. Two upstream reads per miss.
+        cacheSeconds: 60
+        # Left empty to use ~/Library/Application Support/AutoClaw-official.
+        accountRoot: ''
+        # Left empty to read the installed app's version (X-Version header).
+        appVersion: ''
