@@ -164,6 +164,47 @@ test('a spent model is recorded and the request is served by the next model', as
   }
 })
 
+/** A gateway that starts an SSE answer and then breaks the connection. */
+async function brokenGateway() {
+  const server = createServer((req, res) => {
+    req.on('data', () => {})
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'partial' } }] })}\n\n`)
+      // Kill the socket mid-answer: no finish_reason, no [DONE].
+      setTimeout(() => { res.socket?.destroy() }, 20)
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  return { server, port: server.address().port }
+}
+
+test('a stream that breaks mid-answer reports an error frame, not a bare disconnect', async () => {
+  const gateway = await brokenGateway()
+  const shim = await shimAgainst(gateway.port)
+  try {
+    const response = await fetch(`${shim.baseUrl()}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${shim.token()}` },
+      body: JSON.stringify({ model: 'zai_auto', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    // The status line was already 200; the body has to carry the failure.
+    assert.equal(response.status, 200)
+    const text = await response.text()
+    assert.ok(text.includes('"error"'), `expected an error frame, got: ${text.slice(-200)}`)
+    const frames = text.split('\n').filter((line) => line.startsWith('data: {'))
+    const payload = JSON.parse(frames.pop().slice('data: '.length))
+    assert.equal(payload.error.type, 'upstream_error')
+    assert.equal(payload.error.code, 'stream_failed')
+    assert.ok(payload.error.message.length > 0)
+    // [DONE] would claim the answer finished — the one thing this path knows is false.
+    assert.equal(text.includes('[DONE]'), false)
+  } finally {
+    await shim.close()
+    gateway.server.close()
+  }
+})
+
 test('with no usable fallback the request fails and names the model', async () => {
   const gateway = await fakeGateway(['zaicoding_glm-5.3'])
   const shim = await shimAgainst(gateway.port, {
