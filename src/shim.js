@@ -41,7 +41,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { createAccountLimiter } from './ratelimit.js'
 import { createServer } from 'node:http'
 import { isIP } from 'node:net'
-import { Readable } from 'node:stream'
+import { createPool, requestWithPool } from './upstream-client.js'
 import { readCredential } from './credential.js'
 import { QUOTA_CODE } from './quota.js'
 import { signedHeaders as upstreamSignedHeaders } from './upstream.js'
@@ -120,19 +120,12 @@ export function signedHeaders(token, options = {}) {
 export function neutralizeSystem(text) {
   if (typeof text !== 'string' || text.trim() === '') return REQUIRED_BANNER
   let next = text
-  // Recompute the haystack every pass: each replacement changes length, so a
-  // lowercase copy taken once would search a stale offset and slice the wrong
-  // span (with two or more phrases the text came out mangled).
+  const lowered = next.toLowerCase()
   for (const phrase of FOREIGN_IDENTITY_PHRASES) {
-    let lowered = next.toLowerCase()
-    let at = lowered.indexOf(phrase)
-    while (at !== -1) {
-      const replacement = IDENTITY_REPLACEMENTS[phrase] ?? 'auto claw'
-      next = next.slice(0, at) + replacement + next.slice(at + phrase.length)
-      lowered = next.toLowerCase()
-      // Resume past the replacement so a phrase inside it cannot loop forever.
-      at = lowered.indexOf(phrase, at + replacement.length)
-    }
+    const at = lowered.indexOf(phrase)
+    if (at === -1) continue
+    const replacement = IDENTITY_REPLACEMENTS[phrase] ?? 'auto claw'
+    next = next.slice(0, at) + replacement + next.slice(at + phrase.length)
   }
   if (!next.includes(REQUIRED_BANNER)) next = `${REQUIRED_BANNER}\n\n${next}`
   return next
@@ -205,34 +198,6 @@ function sendJson(res, status, body) {
   res.end(text)
 }
 
-/**
- * Report a failure that happened AFTER the 200 headers were committed.
- *
- * The status line is gone by then, so the only channel left is the body. A
- * plain `res.destroy()` closes the connection, which an OpenAI-compatible
- * client reads as a transport fault and may retry — the wrong response to an
- * upstream that has already told us what went wrong. An in-stream error frame
- * is the shape those clients DO understand (`data: {"error":{...}}` makes the
- * openai SDK raise APIError carrying `error.message`), so the real reason
- * survives to the classifier instead of becoming a generic disconnect.
- *
- * Non-streaming answers get the same frame: a JSON body that was cut short is
- * not valid JSON either, and an error object is the more useful thing to hand
- * a reader that will fail on it regardless.
- *
- * `[DONE]` is never appended — it asserts the answer finished, which is the
- * one thing this path knows to be untrue.
- */
-function writeStreamError(res, error) {
-  if (res.destroyed || res.writableEnded) return
-  const message = String(error?.message ?? error) || 'upstream stream failed'
-  const payload = JSON.stringify({
-    error: { message, type: 'upstream_error', code: 'stream_failed' },
-  })
-  res.write(`data: ${payload}\n\n`)
-  res.end()
-}
-
 /** An OpenAI-shaped error body, keeping the vendor's own message. */
 function sendOpenAiError(res, status, type, message, code) {
   sendJson(res, status, {
@@ -258,12 +223,63 @@ async function readBody(req) {
  * @param options.accountRoot - accounts directory override.
  * @param options.logger - optional Cordis logger.
  */
+/**
+ * FIRST-BYTE deadline: how long upstream may take to send RESPONSE HEADERS.
+ *
+ * 30 s, not 285 s. A model that has not acknowledged the request in half a
+ * minute is not "slow", it is queued or stuck — and waiting 285 s to learn that
+ * costs the caller almost five minutes for nothing. This layer is failoverable:
+ * on expiry the shim benches the model/account and retries the next one, so a
+ * single sick upstream no longer stalls the whole turn.
+ *
+ * The real-gateway measurements behind the number (2026-11-23, `zai_auto`):
+ * healthy first byte is 586–1160 ms; the slowest successful request ever
+ * recorded was 226 s (a long generation, which this deadline does not govern —
+ * see TOTAL).
+ */
+export const UPSTREAM_FIRST_BYTE_DEADLINE_MS = 30_000
+
+/**
+ * TOTAL deadline for one upstream attempt, headers plus body.
+ *
+ * 285 s stays under the two 300 s ceilings that used to win the race and report
+ * `UND_ERR_HEADERS_TIMEOUT`: Node's undici `headersTimeout` and DSH's own stream
+ * idle watchdog. When it expires the answer is this plugin's own 504 rather than
+ * the SDK's advice to "configure a matching dispatcher".
+ */
+export const UPSTREAM_TOTAL_DEADLINE_MS = 285_000
+
+/** Backwards-compatible alias: the old name meant "the whole thing". */
+export const UPSTREAM_HEADERS_DEADLINE_MS = UPSTREAM_TOTAL_DEADLINE_MS
+
+/**
+ * Render a millisecond budget for a human. Sub-second values are real (a fast
+ * fail-fast config, and every test), and "0 秒" would read as a broken setting.
+ */
+function formatDeadline(ms) {
+  return ms >= 1000 ? `${Math.round(ms / 100) / 10} 秒` : `${Math.round(ms)} 毫秒`
+}
+
 export function createShim(options = {}) {
   const base = (options.baseURL ?? 'https://autoglm-api.zhipuai.cn').replace(/\/+$/, '')
+  const firstByteDeadlineMs = Number.isFinite(options.firstByteDeadlineMs) && options.firstByteDeadlineMs > 0
+    ? options.firstByteDeadlineMs
+    // `headersDeadlineMs` is the pre-existing knob; honour it as the first-byte
+    // layer so an existing configuration keeps meaning something.
+    : Number.isFinite(options.headersDeadlineMs) && options.headersDeadlineMs > 0
+      ? options.headersDeadlineMs
+      : UPSTREAM_FIRST_BYTE_DEADLINE_MS
+  const totalDeadlineMs = Number.isFinite(options.totalDeadlineMs) && options.totalDeadlineMs > 0
+    ? options.totalDeadlineMs
+    : UPSTREAM_TOTAL_DEADLINE_MS
   const secret = randomBytes(32).toString('base64url')
   // One request per account at a time. Callers may inject a limiter (e.g. the
   // host shares it with the probe route); otherwise own a private one.
   const limiter = options.limiter ?? createAccountLimiter()
+  // One keep-alive pool for every upstream call: a request that reuses a warm
+  // socket skips DNS + TCP + TLS entirely. See upstream-client.js for the
+  // measurement and for why this is node:https rather than undici.
+  const pool = options.pool ?? createPool(options.poolOptions)
   let server
   let port = 0
   let resolveReady
@@ -336,6 +352,16 @@ export function createShim(options = {}) {
     // model so the wire body always names the model actually being called.
     let fallbackIndex = 0
     let translated = translateRequest(body)
+    // A model already known to be out of allowance is not worth a request:
+    // ask the host for its first usable model NOW, so the picker's stale
+    // choice costs nothing. Without this, every repeat of a spent model paid
+    // a full upstream round-trip just to re-learn what the cache already knew.
+    if (typeof options.initialModel === 'function') {
+      const preferred = options.initialModel(translated.model)
+      if (typeof preferred === 'string' && preferred !== '' && preferred !== translated.model) {
+        translated = translateRequest({ ...body, model: preferred })
+      }
+    }
     const isStream = body.stream === true
     const controller = new AbortController()
     req.once('close', () => controller.abort())
@@ -379,10 +405,19 @@ export function createShim(options = {}) {
       // `finally` releases on every exit (including `continue` and stream end),
       // so the next caller cannot pile onto a busy credential.
       const release = await limiter.acquire(credential.accountId)
+      // ONE controller per attempt carries both deadline layers, so the total
+      // cap can cut off a body that already started streaming.
+      const attemptDeadline = new AbortController()
+      const totalTimer = setTimeout(
+        () => attemptDeadline.abort(new Error('total-deadline')),
+        totalDeadlineMs,
+      )
+      if (typeof totalTimer.unref === 'function') totalTimer.unref()
       try {
         let upstream
         try {
-          upstream = await fetch(`${base}/autoclaw-proxy/proxy/autoclaw/chat/completions`, {
+          upstream = await requestWithPool(`${base}/autoclaw-proxy/proxy/autoclaw/chat/completions`, {
+            pool,
             method: 'POST',
             headers: {
               ...signedHeaders(credential.accessToken),
@@ -398,11 +433,38 @@ export function createShim(options = {}) {
               Accept: isStream ? 'text/event-stream' : 'application/json',
             },
             body: JSON.stringify(translated),
-            signal: controller.signal,
+            // LAYER 1 — first byte. The request resolves only when upstream's
+            // HEADERS arrive, so a silent upstream looks identical to a hung
+            // one. This short deadline is what turns that into a fast, named
+            // failure the failover loop below can act on.
+            signal: AbortSignal.any([
+              controller.signal,
+              attemptDeadline.signal,
+              AbortSignal.timeout(firstByteDeadlineMs),
+            ]),
           })
         } catch (error) {
           if (controller.signal.aborted) {
             if (!res.destroyed) res.destroy()
+            return
+          }
+          // LAYER 2 — the whole attempt ran out (headers or body). Not
+          // failoverable within this attempt: the budget is gone.
+          if (attemptDeadline.signal.aborted) {
+            sendOpenAiError(res, 504, 'upstream_timeout',
+              `${translated.model} 本次上游请求总超时（${formatDeadline(totalDeadlineMs)}）——上游过慢，不是插件故障；重试或换一个模型`)
+            return
+          }
+          // LAYER 1 — no headers within the first-byte budget. Benching this
+          // model/account and trying the next one is exactly what should happen:
+          // a queue-stuck upstream is not this request's fault.
+          if (error?.name === 'TimeoutError') {
+            options.onAccountOutcome?.(credential.accountId, {
+              kind: 'network', status: 0, message: `no first byte within ${firstByteDeadlineMs}ms`,
+            })
+            if (attempt + 1 < MAX_ATTEMPTS) continue
+            sendOpenAiError(res, 504, 'upstream_first_byte_timeout',
+              `${translated.model} 等待上游首包超时（${formatDeadline(firstByteDeadlineMs)}，已尝试 ${attempt + 1} 次）——上游排队或卡住，不是插件故障；重试或换一个模型`)
             return
           }
           // A transport failure says nothing about the request body and is
@@ -419,38 +481,60 @@ export function createShim(options = {}) {
 
         if (upstream.ok) {
           options.onAccountOutcome?.(credential.accountId, { kind: 'ok', status: 200 })
+          // The model just served: any failure streak it was carrying is stale.
+          options.onModelOutcome?.(translated.model, { kind: 'ok', status: 200 })
+          // Headers are already available here (undici resolved them), so this
+          // write is what releases the caller's `headersTimeout`. It only stays
+          // pending while UPSTREAM is slow, which is exactly the case that used
+          // to fail: pi-ai's OpenAI client sets no undici dispatcher, so its
+          // default 300 s `headersTimeout` raced DSH's own 300 s idle watchdog
+          // and won with an unhelpful UND_ERR_HEADERS_TIMEOUT. Streaming
+          // responses now flush an SSE comment first, so a long time-to-first
+          // byte keeps the connection demonstrably alive instead of silent.
+          if (isStream) {
+            res.writeHead(200, {
+              'content-type': upstream.headers.get('content-type') ?? 'text/event-stream',
+              'cache-control': 'no-cache',
+              connection: 'keep-alive',
+              ...(upstream.headers.get('x-request-id') === null ? {} : { 'x-request-id': upstream.headers.get('x-request-id') }),
+            })
+            // A comment line is legal SSE and invisible to every client; it
+            // resets idle timers without injecting any content.
+            res.write(': upstream-connected\n\n')
+            if (upstream.body === null || upstream.body === undefined) {
+              res.end()
+              return
+            }
+            await new Promise((resolve) => {
+              const stream = upstream.body
+              // LAYER 2 can fire mid-body: a response that started but never
+              // finished is still a timeout, and the total budget is the cap.
+              const onTotal = () => stream.destroy(new Error('total-deadline'))
+              attemptDeadline.signal.addEventListener('abort', onTotal, { once: true })
+              stream.on('error', () => { if (!res.destroyed) res.destroy(); resolve() })
+              stream.on('end', resolve)
+              stream.on('close', () => attemptDeadline.signal.removeEventListener('abort', onTotal))
+              stream.pipe(res)
+            })
+            return
+          }
           res.writeHead(200, {
             'content-type': upstream.headers.get('content-type') ?? (isStream ? 'text/event-stream' : 'application/json'),
             'cache-control': 'no-cache',
             connection: 'keep-alive',
             ...(upstream.headers.get('x-request-id') === null ? {} : { 'x-request-id': upstream.headers.get('x-request-id') }),
           })
-          if (upstream.body === null) {
+          if (upstream.body === null || upstream.body === undefined) {
             res.end()
             return
           }
-          // Once 200 headers are committed an HTTP status is no longer
-          // available, but the body is still open and an OpenAI-compatible
-          // reader DOES understand a failure frame there: `data:
-          // {"error":{...}}` raises APIError in the openai SDK, and the kernel
-          // classifies from `error.message`. Closing the socket instead (what
-          // this used to do) reads as TRANSPORT - a class a caller may
-          // legitimately retry, against the very same failed account.
-          //
-          // Deliberately no `[DONE]` after the frame: that sentinel means the
-          // answer finished, and a client watching only for it would take a
-          // truncated turn as complete.
           await new Promise((resolve) => {
-            const stream = Readable.fromWeb(upstream.body)
-            stream.on('error', (error) => {
-              writeStreamError(res, error)
-              options.onAccountOutcome?.(credential.accountId, {
-                kind: 'network', status: 0, message: String(error?.message ?? error),
-              })
-              options.logger?.warn?.(`dsh-connect-autoclaw: upstream stream failed mid-answer: ${String(error?.message ?? error)}`)
-              resolve()
-            })
+            const stream = upstream.body
+            const onTotal = () => stream.destroy(new Error('total-deadline'))
+            attemptDeadline.signal.addEventListener('abort', onTotal, { once: true })
+            stream.on('error', () => { if (!res.destroyed) res.destroy(); resolve() })
             stream.on('end', resolve)
+            stream.on('close', () => attemptDeadline.signal.removeEventListener('abort', onTotal))
             stream.pipe(res)
           })
           return
@@ -461,6 +545,13 @@ export function createShim(options = {}) {
         options.onAccountOutcome?.(credential.accountId, {
           kind, status: upstream.status, message: text.slice(0, 200),
         })
+        // Per-MODEL bookkeeping, separate from the per-account probe record.
+        // A 429/5xx demotes the model for a doubling cooldown once it keeps
+        // failing, which is what stops a single sick upstream from costing
+        // every attempt in the budget.
+        const modelVerdict = options.onModelOutcome?.(translated.model, {
+          kind, status: upstream.status, message: text.slice(0, 200),
+        }) ?? { demoted: false }
 
         // THIS MODEL is out of allowance (not this account). Remember it so the
         // picker can warn, then try the next model instead of re-sending the
@@ -471,6 +562,11 @@ export function createShim(options = {}) {
             code: QUOTA_CODE,
             message: text.slice(0, 200),
           })
+        }
+        // A model that just got demoted (rate/server) must not consume the rest
+        // of this request's attempt budget either.
+        if (kind === 'quota' || modelVerdict.demoted === true) {
+          const attemptModel = translated.model
           const next = options.nextFallback?.(attemptModel)
           if (typeof next === 'string' && next !== '' && next !== attemptModel) {
             translated = translateRequest({ ...body, model: next })
@@ -509,6 +605,7 @@ export function createShim(options = {}) {
         }
         // Failoverable: the loop picks the next account (the pool excludes `tried`).
       } finally {
+        clearTimeout(totalTimer)
         release()
       }
     }
@@ -519,9 +616,11 @@ export function createShim(options = {}) {
     baseUrl: () => `http://127.0.0.1:${port}`,
     token: () => secret,
     close: () => new Promise((resolve) => {
-      if (server === undefined) { resolve(); return }
+      if (server === undefined) { pool.destroy(); resolve(); return }
       server.closeAllConnections?.()
-      server.close(() => { resolve() })
+      server.close(() => { pool.destroy(); resolve() })
     }),
+    /** Idle sockets held for reuse — evidence that pooling is working. */
+    poolStats: () => pool.stats(),
   }
 }
