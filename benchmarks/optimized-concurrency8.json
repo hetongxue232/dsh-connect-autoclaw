@@ -1,0 +1,188 @@
+{
+  "label": "optimized concurrency=8",
+  "concurrency": 8,
+  "environment": {
+    "model": "zai_auto",
+    "stream": true,
+    "upstream": "https://autoglm-api.zhipuai.cn"
+  },
+  "summary": {
+    "samples": 24,
+    "ok": 24,
+    "ttfbP50": 2722,
+    "ttfbP90": 4715,
+    "throughputPerSec": 1.25,
+    "timeoutRate": 0,
+    "errorRate": 0
+  },
+  "rows": [
+    {
+      "ttfbMs": 794.7565,
+      "totalMs": 1818.238084,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 3585.178625,
+      "totalMs": 5025.725875,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 5024.366291,
+      "totalMs": 5857.999375,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 3719.5080829999997,
+      "totalMs": 4964.5772910000005,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 3528.855583,
+      "totalMs": 5266.191833,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 2469.124167,
+      "totalMs": 4254.3215,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1152.0637920000001,
+      "totalMs": 1817.394958,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 2127.128541,
+      "totalMs": 2767.230125,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 4191.400625,
+      "totalMs": 5341.867082999999,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1128.1735419999995,
+      "totalMs": 2257.8305839999994,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1512.7129169999998,
+      "totalMs": 3157.9693749999997,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1127.8069170000008,
+      "totalMs": 4035.4627500000006,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 3791.4284590000007,
+      "totalMs": 5495.736417,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 4715.3195,
+      "totalMs": 5802.903250000001,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1901.024875,
+      "totalMs": 3140.0934159999997,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 2940.138333,
+      "totalMs": 4363.390416000001,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 871.8005839999987,
+      "totalMs": 3170.789917,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 4928.795375,
+      "totalMs": 7462.328792000002,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 4431.925249999998,
+      "totalMs": 7462.031875000001,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 2722.207124999999,
+      "totalMs": 5810.876374999998,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1237.4487910000007,
+      "totalMs": 2289.492666,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 2040.4164170000004,
+      "totalMs": 2841.590458999999,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 2937.9002920000003,
+      "totalMs": 4282.142458,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 3474.8198749999992,
+      "totalMs": 6010.6601249999985,
+      "status": 200,
+      "outcome": "ok",
+      "detail": ""
+    }
+  ]
+}
