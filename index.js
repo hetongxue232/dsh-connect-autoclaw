@@ -307,7 +307,7 @@ export function apply(ctx, config = {}) {
     catalogUpdatedAt: '',
     // Which build the host actually loaded. Bumped whenever the host half
     // changes, so a running process can be identified without guesswork.
-    build: '2026-11-22-quota-fallback',
+    build: '2026-11-22-stream-error-frame',
   }
   // Seeded synchronously: the GUI reads the catalog as soon as the adapter is
   // registered, long before the gateway request below resolves.
