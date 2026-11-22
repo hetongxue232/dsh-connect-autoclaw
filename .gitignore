@@ -1,0 +1,6 @@
+.DS_Store
+node_modules/
+.e2e/
+*.bak-*
+*.bak.*
+atuoclaw-vault/
