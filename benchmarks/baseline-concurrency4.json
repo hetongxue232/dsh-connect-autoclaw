@@ -1,0 +1,128 @@
+{
+  "label": "pre-optimization concurrency=4",
+  "concurrency": 4,
+  "environment": {
+    "model": "zai_auto",
+    "stream": true,
+    "upstream": "https://autoglm-api.zhipuai.cn"
+  },
+  "summary": {
+    "samples": 12,
+    "ok": 12,
+    "ttfbP50": 4331,
+    "ttfbP90": 8515,
+    "throughputPerSec": 0.36,
+    "timeoutRate": 0,
+    "errorRate": 0
+  },
+  "rows": [
+    {
+      "ttfbMs": 2227.5199580000003,
+      "firstContentMs": 2227.567375,
+      "totalMs": 2316.055292,
+      "status": 200,
+      "bytes": 15921,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 10941.116291999999,
+      "firstContentMs": 10941.228792,
+      "totalMs": 11774.543249999999,
+      "status": 200,
+      "bytes": 16196,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 7443.066125,
+      "firstContentMs": 7443.167083,
+      "totalMs": 10168.820792,
+      "status": 200,
+      "bytes": 34636,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 3370.657083,
+      "firstContentMs": 3370.7784580000002,
+      "totalMs": 6199.030374999999,
+      "status": 200,
+      "bytes": 32303,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 4331.31675,
+      "firstContentMs": 4331.428749999999,
+      "totalMs": 5837.531041999999,
+      "status": 200,
+      "bytes": 13754,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 815.1056659999995,
+      "firstContentMs": 815.2704159999994,
+      "totalMs": 3663.5321249999997,
+      "status": 200,
+      "bytes": 26136,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 6447.596625000002,
+      "firstContentMs": 6447.895250000001,
+      "totalMs": 7876.932542000002,
+      "status": 200,
+      "bytes": 23948,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 8504.580958,
+      "firstContentMs": 8504.654916000001,
+      "totalMs": 10272.318458,
+      "status": 200,
+      "bytes": 18808,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 966.1576669999995,
+      "firstContentMs": 966.3817090000011,
+      "totalMs": 2996.355542000001,
+      "status": 200,
+      "bytes": 25846,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 8515.330249999999,
+      "firstContentMs": 8515.3845,
+      "totalMs": 11250.616624999999,
+      "status": 200,
+      "bytes": 30598,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 3630.62125,
+      "firstContentMs": 3630.719165999999,
+      "totalMs": 4649.225791000001,
+      "status": 200,
+      "bytes": 11883,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 5246.575417,
+      "firstContentMs": 5246.644791999999,
+      "totalMs": 7623.690957999999,
+      "status": 200,
+      "bytes": 29109,
+      "outcome": "ok",
+      "detail": ""
+    }
+  ]
+}
