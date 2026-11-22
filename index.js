@@ -53,7 +53,7 @@ import {
   walletsOf,
 } from './src/upstream.js'
 import { createShim, signedHeaders, classifyFailure, isFailoverable, REQUIRED_BANNER, translateRequest } from './src/shim.js'
-import { createAccountLimiter } from './src/ratelimit.js'
+import { createAccountLimiter, DEFAULT_MAX_CONCURRENT } from './src/ratelimit.js'
 import { createTokenRefresher } from './src/refresh.js'
 import { createAdapter } from './src/adapter.js'
 import {
@@ -151,6 +151,7 @@ const PROBE_TIMEOUT_MS = 90_000
 import { resolveProbeTokens, probeMessages } from './src/probe.js'
 import { createCatalogAnnouncer, catalogResponseBody } from './src/catalog.js'
 import { annotateCatalog, fallbackChain, isQuotaExhausted, noteQuotaExhausted, pruneQuota } from './src/quota.js'
+import { demotedModels, noteModelOutcome, pruneModelHealth } from './src/model-health.js'
 export { resolveProbeTokens, probeMessages } from './src/probe.js'
 
 /** Re-exported for the plugin's own consumers; the implementation lives in loopback.js. */
@@ -293,6 +294,15 @@ export function apply(ctx, config = {}) {
     appVersion: config.appVersion ?? '',
     rateLimitIntervalMs: config.rateLimitIntervalMs ?? 400,
     rateLimitEnabled: config.rateLimitEnabled !== false,
+    // In-flight requests allowed per account. 1 restores the old serial gate;
+    // 4 is the measured sweet spot (see src/ratelimit.js for the numbers).
+    maxConcurrentPerAccount: config.maxConcurrentPerAccount ?? DEFAULT_MAX_CONCURRENT,
+    // 429/5xx demotion: consecutive failures that trip it, and the first cooldown.
+    modelHealthOptions: {
+      threshold: config.modelFailureThreshold,
+      cooldownMs: config.modelCooldownMs,
+      maxCooldownMs: config.modelMaxCooldownMs,
+    },
     refreshLeadMs: config.refreshLeadMs ?? 60_000,
   }
   const cache = createCache(Number.isFinite(settings.cacheSeconds) ? settings.cacheSeconds : 60)
@@ -307,7 +317,7 @@ export function apply(ctx, config = {}) {
     catalogUpdatedAt: '',
     // Which build the host actually loaded. Bumped whenever the host half
     // changes, so a running process can be identified without guesswork.
-    build: '2026-11-22-stream-error-frame',
+    build: '2026-11-23-perf4-pool-window-timeout-health',
   }
   // Seeded synchronously: the GUI reads the catalog as soon as the adapter is
   // registered, long before the gateway request below resolves.
@@ -339,7 +349,7 @@ export function apply(ctx, config = {}) {
   // State lives in the plugin's own vault; the app's files stay read-only.
   // State loads asynchronously (apply() is sync by contract): handlers await
   // `stateReady`, so no request races the read. Defaults apply until then.
-  const state = { selectedAccountId: '', poolEnabled: false, probes: {}, probeTier: undefined, quota: {} }
+  const state = { selectedAccountId: '', poolEnabled: false, probes: {}, probeTier: undefined, quota: {}, modelHealth: {} }
   // WHAT THE PICKER SEES. `modelCatalog()` reads `group.models[].name` for its
   // labels, so an exhausted model is decorated there — the one field that
   // reaches the model selector. `quotaExhausted` rides along as structured data
@@ -351,7 +361,9 @@ export function apply(ctx, config = {}) {
   // answered 400).
   const annotated = () => annotateCatalog(catalog(), {
     quota: state.quota,
+    demoted: demotedModels(state.modelHealth),
     suffix: (name) => `${name} · 额度已用完`,
+    demotedSuffix: (name) => `${name} · 暂时不可用`,
   })
 
   const stateReady = loadState().then((loaded) => {
@@ -383,9 +395,13 @@ export function apply(ctx, config = {}) {
     },
   })
 
-  // Per-account request gate: one in flight at a time, >= interval between
-  // dispatches. Other accounts stay independent so the pool still parallelises.
+  // Per-account request gate: a bounded concurrency window plus a minimum gap
+  // between dispatches. Serialising on one slot made concurrency worse than
+  // useless — TTFB p50 went 623 ms → 4331 ms at 4 concurrent callers — because
+  // every request waited for the previous one's whole response. The window lets
+  // independent requests overlap; `rateLimitIntervalMs` still paces dispatch.
   const limiter = createAccountLimiter({
+    maxConcurrentPerAccount: settings.maxConcurrentPerAccount,
     minIntervalMs: Number.isFinite(settings.rateLimitIntervalMs) ? settings.rateLimitIntervalMs : 400,
     enabled: settings.rateLimitEnabled,
   })
@@ -478,6 +494,17 @@ export function apply(ctx, config = {}) {
   }
 
   ctx.inject(['llm'], (llmCtx) => {
+    // One builder for every model choice this plugin makes: the first attempt,
+    // each fallback hop, and the diagnostics view all agree on which models are
+    // currently unusable (allowance gone OR cooling down).
+    const chainFor = (requested) => fallbackChain({
+      model: requested,
+      catalog: catalog().map((row) => row.id),
+      preferred: FALLBACK_MODEL_ID,
+      quota: state.quota,
+      demoted: demotedModels(state.modelHealth),
+    })
+
     const shim = createShim({
       baseURL: settings.baseURL,
       accountRoot: settings.accountRoot,
@@ -498,15 +525,22 @@ export function apply(ctx, config = {}) {
         // The picker must relabel without waiting for the next catalog poll.
         try { registration?.replace?.([PROVIDER_ID]) } catch { /* not yet held */ }
       },
+      // Per-model health: a 429/5xx counts against the MODEL. Past the
+      // threshold it cools down for a doubling window, and the shim advances
+      // the chain at once instead of spending the rest of its budget on it.
+      onModelOutcome: (model, outcome) => {
+        const verdict = noteModelOutcome(state.modelHealth, model, outcome, settings.modelHealthOptions)
+        pruneModelHealth(state.modelHealth)
+        if (verdict.demoted === true) void persistState()
+        return verdict
+      },
+      // Before the first attempt: a model already cooling down is replaced by
+      // the chain's first usable entry, so the request never pays a round-trip
+      // the health record can predict.
+      initialModel: (requested) => chainFor(requested)[0],
       nextFallback: (attemptModel) => {
-        const chain = fallbackChain({
-          model: attemptModel,
-          catalog: catalog().map((row) => row.id),
-          preferred: FALLBACK_MODEL_ID,
-          quota: state.quota,
-        })
         // The shim already failed on the first entry; hand it the next one.
-        return chain.find((id) => id !== attemptModel)
+        return chainFor(attemptModel).find((id) => id !== attemptModel)
       },
       limiter,
     })
@@ -698,6 +732,13 @@ export function apply(ctx, config = {}) {
             // here came from the gateway; the browser does not re-derive it.
             catalog: catalogCache,
             catalogLive,
+            // THE GATE, as the running process sees it: per-account window,
+            // what is in flight, and what is queued behind a full window.
+            // `snapshot('*')` would look up a literal account named "*", so the
+            // all-lanes view is its own call.
+            limiter: limiter.snapshotAll(),
+            // Models currently cooling down from rate/server failures.
+            modelHealth: { demoted: demotedModels(state.modelHealth), records: state.modelHealth },
           })
         },
       })
