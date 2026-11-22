@@ -1,0 +1,238 @@
+{
+  "label": "legacy (window=1, no pool)",
+  "capturedAt": "2026-11-23T00:2x+08:00",
+  "environment": {
+    "host": "macOS 15.8 arm64",
+    "node": "v24.21.0",
+    "upstream": "https://autoglm-api.zhipuai.cn",
+    "model": "zai_auto",
+    "stream": true,
+    "accounts": 1,
+    "link": "loopback"
+  },
+  "method": {
+    "tool": "bench.mjs",
+    "rounds": 20,
+    "concurrency": 1,
+    "ttfb": "POST sent → first non-empty body byte",
+    "percentile": "nearest-rank"
+  },
+  "summary": {
+    "samples": 20,
+    "ok": 20,
+    "timeoutRate": 0,
+    "errorRate": 0,
+    "min": 812,
+    "p25": 903,
+    "p50": 986,
+    "p75": 1234,
+    "p90": 1797,
+    "max": 4437,
+    "mean": 1236,
+    "stdev": 779
+  },
+  "rawTtfbMs": [
+    812.0,
+    848.9,
+    857.5,
+    865.1,
+    874.4,
+    903.3,
+    910.4,
+    917.4,
+    950.1,
+    975.8,
+    985.8,
+    996.4,
+    1033.4,
+    1043.1,
+    1229.5,
+    1233.8,
+    1455.6,
+    1603.5,
+    1796.7,
+    4436.5
+  ],
+  "rawRequestRecords": [
+    {
+      "ttfbMs": 1229.465875,
+      "firstContentMs": 1229.8115830000002,
+      "totalMs": 2147.96875,
+      "status": 200,
+      "bytes": 19118,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 975.7512499999998,
+      "firstContentMs": 975.9754589999998,
+      "totalMs": 5718.273417,
+      "status": 200,
+      "bytes": 41709,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 4436.548499999999,
+      "firstContentMs": 4436.699666999999,
+      "totalMs": 6350.2155,
+      "status": 200,
+      "bytes": 25818,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1455.5578749999986,
+      "firstContentMs": 1455.7421669999985,
+      "totalMs": 3049.6155419999996,
+      "status": 200,
+      "bytes": 24432,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 812.0271659999999,
+      "firstContentMs": 812.1672910000016,
+      "totalMs": 2014.5557499999995,
+      "status": 200,
+      "bytes": 22031,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 865.0813330000019,
+      "firstContentMs": 865.1724160000012,
+      "totalMs": 4487.336040999999,
+      "status": 200,
+      "bytes": 36763,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 857.5084160000006,
+      "firstContentMs": 857.6859160000022,
+      "totalMs": 1871.8826660000013,
+      "status": 200,
+      "bytes": 15943,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1603.4576669999988,
+      "firstContentMs": 1603.5784170000006,
+      "totalMs": 2366.775249999999,
+      "status": 200,
+      "bytes": 18269,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 903.2676250000004,
+      "firstContentMs": 903.3209590000006,
+      "totalMs": 2584.113208999999,
+      "status": 200,
+      "bytes": 18224,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 950.0924999999988,
+      "firstContentMs": 950.1271249999991,
+      "totalMs": 6043.182415999996,
+      "status": 200,
+      "bytes": 101595,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1233.8472919999986,
+      "firstContentMs": 1233.9596249999959,
+      "totalMs": 2840.2592499999955,
+      "status": 200,
+      "bytes": 31345,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 985.8464170000007,
+      "firstContentMs": 985.8720420000027,
+      "totalMs": 2904.8809170000022,
+      "status": 200,
+      "bytes": 38166,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1043.0822919999991,
+      "firstContentMs": 1043.2050830000007,
+      "totalMs": 4599.278917000003,
+      "status": 200,
+      "bytes": 46975,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 996.427334,
+      "firstContentMs": 996.5235420000026,
+      "totalMs": 2730.087375000003,
+      "status": 200,
+      "bytes": 24918,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1796.7272920000032,
+      "firstContentMs": 1796.7658749999973,
+      "totalMs": 1984.4938750000001,
+      "status": 200,
+      "bytes": 17506,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 874.3500839999979,
+      "firstContentMs": 874.8705419999969,
+      "totalMs": 3304.020083999996,
+      "status": 200,
+      "bytes": 33230,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 910.4311670000025,
+      "firstContentMs": 910.5324170000022,
+      "totalMs": 2395.560083000004,
+      "status": 200,
+      "bytes": 16767,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 1033.391042000003,
+      "firstContentMs": 1033.4234999999971,
+      "totalMs": 2340.2014169999966,
+      "status": 200,
+      "bytes": 15781,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 848.8922909999965,
+      "firstContentMs": 848.9942499999961,
+      "totalMs": 3143.240665999998,
+      "status": 200,
+      "bytes": 25594,
+      "outcome": "ok",
+      "detail": ""
+    },
+    {
+      "ttfbMs": 917.4312920000011,
+      "firstContentMs": 917.4629169999971,
+      "totalMs": 1693.7067499999976,
+      "status": 200,
+      "bytes": 19461,
+      "outcome": "ok",
+      "detail": ""
+    }
+  ]
+}
