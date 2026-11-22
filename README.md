@@ -120,59 +120,110 @@ disable 再 enable（live profile 立即生效，无需重启 App），或重启
 | 项 | 结果 |
 |---|---|
 | 解 safeStorage 凭据 | ✅ |
-| 积分 `/agent-assetmgr/api/v2/wallets` | ✅ `total_balance = 13719` |
-| 积分流水 `/ledgers` | ✅ 返回真实条目 |
+| 积分 `/agent-assetmgr/api/v2/wallets` | ✅ `total_balance = 10232` |
 | 模型目录 `/autoclaw-proxy/proxy/autoclaw-model-config` | ✅ 5 个模型 |
 | provider 诊断 | `registered:true, shimUrl 非 0, catalogSize:5, catalogError:""` |
-| shim 端到端非流式 | ✅ 200 `PONG` |
-| shim 端到端流式 SSE | ✅ 200，`[DONE]` 收尾 |
+| shim 端到端（裸请求 / 外来身份短语 + max_tokens / 非流式） | ✅ 200 |
 | 错误 secret / 无 secret | ✅ 401（覆盖 `/v1/models`） |
-| 伪造 Host（DNS rebinding） | ✅ 403 |
-| 真实网关探针（`POST /probe`） | ✅ `outcome:ok`，2.8s |
-| 11 条浏览器路由 Host/Origin 校验 | ✅ 全覆盖 |
-| MCP `tools/call` 三个工具 | ✅ 真实数据 |
-| 78 个单元测试（真机 + 无 AutoClaw 的干净 HOME） | ✅ 全通过 |
+| 不存在的模型 | ✅ 400 上游原文透传 |
+| 15 个单元测试 | ✅ 全通过 |
 | client 组件树（7 slot / 三 surface / 4 面板 / Gate / ModelLabel） | ✅ stub React 验证 |
+
+## 性能：四项优化与 A/B 基准（v2.6.0）
+
+反代的延迟由四层决定，四层各自独立可测。以下数据全部来自本机对**真实上游**的实测，
+脚本在 [`benchmarks/`](benchmarks/)，原始采样在同目录，可复现。
+
+### 改了什么
+
+| # | 项 | 改动前 | 改动后 |
+|---|---|---|---|
+| ① | 账号并发门 | 每账号**严格串行**（同时只允许 1 个请求） | 有界并发窗口，默认 `maxConcurrentPerAccount: 4` |
+| ② | 上游连接 | 每请求新建 TCP+TLS | `node:https` keep-alive 连接池（16 sockets） |
+| ③ | 超时 | 单一 285 s | **首包 30 s**（可 failover）+ **总 285 s** |
+| ④ | 429/5xx | 只换账号，不记模型 | 连续 2 次即降权，指数退避 60s→120s→…→15min 上限 |
+
+### 结果（`zai_auto`，流式，真实网关）
+
+| 并发 | 改造前 TTFB p50 | 改造后 p50 | 变化 | 吞吐 |
+|---|---|---|---|---|
+| 4 | 4331 ms | **1293 ms** | **−70%** | 0.36 → 0.54/s |
+| 8 | 13625 ms | **2722 ms** | **−80%** | 0.27 → **1.25/s** |
+
+成功率 36/36，超时 0%，错误 0%。
+
+### 关键教训：不要拿历史数字比
+
+单发（并发 1）曾记录到 623 ms，优化后测出 928 ms，看上去"退化了 49%"。
+**这是测量伪影**。给 harness 加 `--legacy` 后，用**同一份代码**重跑两遍各 20 次：
+
+| 配置 | min | p25 | **p50** | p75 | p90 | max | mean |
+|---|---|---|---|---|---|---|---|
+| legacy（窗口1，无连接池） | 812 | 903 | **986** | 1234 | 1797 | 4437 | 1236 |
+| 优化后（窗口4，连接池） | **646** | 846 | **937** | 1237 | 2559 | 3118 | 1197 |
+
+优化后 p50 实际**快 5%**，`min` 快 20%（省掉一次 TLS 握手）。单发时窗口宽度不参与，
+收益只来自连接池。历史 623 ms 是一次幸运样本，而上游自身波动 ±60%（实测散布
+623–1489 ms），**跨时段比较没有意义**。
+
+### 复现基准
+
+```bash
+# 1. 起一个独立 shim（与生产同一份代码，自建 secret，另开诊断端口）
+node benchmarks/shim-harness.mjs --window 4 --interval 400
+#    → {"chat":"http://127.0.0.1:PORT","token":"...","diag":"http://127.0.0.1:PORT2","window":4}
+
+# 2. 压测（把 chat/token 填进去）
+node benchmarks/bench.mjs --base <chat> --token <token> \
+  --model zai_auto --concurrency 8 --rounds 3 --stream --out result.json
+
+# 3. 边压测边采样窗口占用（需要 --diag）
+node benchmarks/bench-with-sampler.mjs --base <chat> --diag <diag> --token <token> \
+  --model zai_auto --concurrency 8 --rounds 3 --interval-ms 150 --out curve.json
+```
+
+**`--legacy` 是 A/B 的关键**：它把窗口压回 1 并关掉连接池，跑的是同一份新代码的旧行为。
+
+```bash
+node benchmarks/shim-harness.mjs --legacy --interval 400   # 对照组的传统模式
+node benchmarks/shim-harness.mjs --window 4 --interval 400 # 优化组
+```
+
+### 指标口径（口径不一致就没法比）
+
+| 指标 | 定义 |
+|---|---|
+| TTFB | 发出 POST → 收到**第一个非空 body 字节**。SSE 下即首个 `data:` 帧 |
+| TTFT | 首个含 `delta.content` / `delta.reasoning_content` 的帧（仅流式） |
+| timeout | 在 deadline 内既无响应头也无数据 |
+| error | 非 200，或 200 但 body 无 `choices` / `data:` 帧 |
+| 采样 | 每档 `rounds × concurrency` 个请求；百分位用**最近秩法** |
+
+测试环境：macOS 15.8 arm64，Node v24.21.0，单账号，loopback 连
+`https://autoglm-api.zhipuai.cn`，2026-11-23 00:2x CST。
+
+### 原始数据
+
+| 文件 | 内容 |
+|---|---|
+| [`benchmarks/legacy-concurrency1-20x.json`](benchmarks/legacy-concurrency1-20x.json) | A/B 对照组，20 次逐条 TTFB |
+| [`benchmarks/optimized-concurrency1-20x.json`](benchmarks/optimized-concurrency1-20x.json) | A/B 优化组，20 次逐条 TTFB |
+| [`benchmarks/baseline-concurrency4.json`](benchmarks/baseline-concurrency4.json) | 改造前并发 4 |
+| [`benchmarks/baseline-concurrency8.json`](benchmarks/baseline-concurrency8.json) | 改造前并发 8 |
+| [`benchmarks/optimized-concurrency4.json`](benchmarks/optimized-concurrency4.json) | 改造后并发 4 |
+| [`benchmarks/optimized-concurrency8.json`](benchmarks/optimized-concurrency8.json) | 改造后并发 8 |
+
+### 已知边界
+
+- 单发收益有限（−5%）：上游首包本身 600–900 ms，连接池只省握手那 ~150 ms。
+- 并发 8 时窗口 4 仍是瓶颈（`saturated` 约 50–60%）。放大窗口会把排队转移到网关，
+  可能触发限流——调 `maxConcurrentPerAccount` 前先看 `/provider` 的 `limiter.saturated`。
+- 只测了 `zai_auto`。其他模型的上游延迟未采样。
 
 ## 安装
 
-从 GitHub 克隆后，二选一：
-
-```bash
-git clone https://github.com/hetongxue232/dsh-connect-autoclaw.git
-```
-
-1. **DSH 插件管理器**：`plugin_manager action=install_bundle target=<克隆目录绝对路径>`；
-   或图形界面「插件 → 添加插件 → 本地目录」。
-2. **直接用源码**：把目录放到 `~/.dsh/vendor/` 下，然后 `set_plugin` 指向它。
-
+`plugin_manager action=install_bundle target=<本目录绝对路径>`，或 DSH「插件 → 添加插件 → 本地目录」。
 `list_plugins` / `set_plugin` 用 `include:dsh-connect-autoclaw` 作为 target。
-
-前置条件：本机已安装并登录 AutoClaw 桌面版。插件**只读**它自己的 safeStorage 凭据，
-不写入、不上传。
-
-### 跑测试
-
-```bash
-node --test             # 78 个测试，无需登录、无需联网（不要带目录参数）
-```
-
-每个测试文件也可单独执行：`node test/shim.test.js`。
-
-### 自检
-
-装好后打开 DSH，模型选择器里出现 `atuoclaw` 即成功；装失败时看
-`/plugins/dsh-connect-autoclaw/provider` 的 `registered` / `error` 字段。
-
-## MCP 用法
-
-`mcp/server.mjs` 是同一套只读接口的 MCP stdio 版本，供 AutoClaw 自己的 agent 调用：
-
-```bash
-node <克隆目录>/mcp/server.mjs
-```
-
-三个工具：`autoclaw_points` / `autoclaw_expiring` / `autoclaw_ledger`。详见 [docs/MCP.md](docs/MCP.md)。
 
 ## 致谢与许可
 
