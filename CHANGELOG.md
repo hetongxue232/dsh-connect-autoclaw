@@ -1,5 +1,97 @@
 # Changelog
 
+## 2.6.0 (2026-11-23)
+
+反代性能四连改。全部基于对**真实上游**的实测，脚本与原始采样随包发布在 `benchmarks/`。
+
+### 改动点
+
+**① 账号并发门：串行 → 有界并发窗口**（`src/ratelimit.js` 重写）
+
+- 旧行为：每账号同时只允许 1 个请求，后来者排队等前一个的**完整响应**（队头阻塞）。
+- 新行为：`maxConcurrentPerAccount`，默认 **4**；`1` 可完整恢复旧行为。
+- 保留 `minIntervalMs`（默认 400 ms）作为**派发速率**上限，与并发窗口正交——
+  窗口为 4、间隔 400 ms 时，第 4 个请求仍要等约 1.2 s 才发出。
+- `pump` 单飞锁：`await delay()` 会让出执行权，没有该标志时第二个 pump 会抢走已计数的槽位、破坏 FIFO。
+- 非法窗口（0/负数/小数/NaN）回落到默认值，避免死锁。
+- 新增 `snapshotAll()` 供诊断：`{window, interval, lanes, totals, saturated}`。
+
+**② 上游连接池**（新增 `src/upstream-client.js`）
+
+- 旧行为：每请求走全局 `fetch`，新建 TCP+TLS。
+- 新行为：`node:https` keep-alive `Agent`（`maxSockets 16`，`keepAliveMsecs 30 s`）。
+- **不用 undici 的原因**：插件目录能 `import 'undici'` 只是因为 DSH 的 `node_modules` 在旁
+  （未声明的隐性依赖），且其 dispatcher 协议与内置 `fetch` 不兼容——实测报
+  `UND_ERR_INVALID_ARG: invalid onRequestStart method`。`node:https` 零依赖且是 keep-alive 的正主。
+- `requestWithPool()` 返回 fetch 同形对象（`ok`/`status`/`headers.get`/`body`/`text()`），
+  上层的 failover、quota、流式透传逻辑未改。
+
+**③ 超时分层**（`src/shim.js`）
+
+- 旧行为：单一 285 s，上游卡住要等近 5 分钟。
+- 新行为：**首包 30 s**（响应头）+ **总 285 s**（头+体）。
+- 首包超时**可 failover**：30 s 不确认说明上游有问题，换号/换模型重试是正确行为。
+- 总超时能截断**已经开始的流**（`attemptDeadline` 挂 abort 到 stream），不会装作完整回答。
+- 两个数都低于曾经互撞的两个 300 s 天花板（undici `headersTimeout`、DSH stream idle watchdog），
+  失败时给出本插件自己的 504，而非 SDK 的「去配 dispatcher」。
+- `headersDeadlineMs` 旧参数仍有效，作为首包层，不影响既有配置。
+
+**④ 429/5xx 模型降权**（新增 `src/model-health.js`）
+
+- 旧行为：`rate`/`server` 只换账号；单账号时等于用同一条死路重试 3 次。
+- 新行为：同一模型连续失败 2 次即降权，冷却窗口指数退避 60s→120s→240s…上限 15 min。
+- **连续计数而非时间窗**：时间窗会让偶发使用的好模型在恢复后仍被记恨；
+  连续计数在首次成功即清零——那才是真正获得新信息的时刻。
+- 只有 `rate`(429/810002) 和 `server`(5xx) 计数；`request`(客户端 bug) 与
+  `credential`(账号问题) 不计，避免误伤健康模型。
+- 选择器标签区分：`· 额度已用完`（810000，6h TTL）vs `· 暂时不可用`（降权中）。
+- 顺带修掉一处**未接线的钩子**：`shim.js` 一直调用 `options.initialModel` 但 `index.js`
+  从未实现，首次尝试因此不会跳过已知不可用的模型。现补齐，并抽出统一 `chainFor()`
+  让首次尝试、fallback 跳转、诊断视图共用同一套可用性判断。
+
+### 诊断
+
+`/plugins/dsh-connect-autoclaw/provider` 新增两个字段：
+
+```json
+{
+  "build": "2026-11-23-perf4-pool-window-timeout-health",
+  "limiter": { "window": 4, "interval": 400, "lanes": {...}, "totals": {...}, "saturated": false },
+  "modelHealth": { "demoted": [], "records": {} }
+}
+```
+
+`limiter.saturated === true` 即窗口打满、有请求在排队——这是调 `maxConcurrentPerAccount` 前的判断依据。
+
+### 实测（`zai_auto`，流式，真实网关，同一脚本口径）
+
+| 并发 | 改造前 p50 | 改造后 p50 | 变化 | 吞吐 |
+|---|---|---|---|---|
+| 4 | 4331 ms | **1293 ms** | **−70%** | 0.36 → 0.54/s |
+| 8 | 13625 ms | **2722 ms** | **−80%** | 0.27 → **1.25/s** |
+
+成功率 36/36，超时 0%，错误 0%。
+
+**单发 A/B（各 20 次，同代码 `--legacy` 对照）**：legacy p50 986 ms / 优化后 937 ms（−5%），
+`min` 812 → 646 ms（−20%，省 TLS 握手）。历史上记录的 623 ms 是一次幸运样本——
+上游波动 ±60%（实测散布 623–1489 ms），跨时段比对无意义，故引入 `--legacy` 做同代码对照。
+
+### 新增文件
+
+- `src/upstream-client.js`、`src/model-health.js`
+- `test/upstream-client.test.js`（8）、`test/model-health.test.js`（12）
+- `benchmarks/`：`bench.mjs`、`bench-with-sampler.mjs`、`shim-harness.mjs`（支持 `--legacy`）+ 6 份原始采样
+
+### 测试
+
+110/110 通过（原 84 + ratelimit 12（重写）+ 连接池 8 + 健康 6 净增）。
+`ratelimit` 从 6 → 15 条、`shim` 15 → 16 条，均按新语义重写。
+
+### 版本
+
+`package.json` 2.5.1 → **2.6.0**；`index.js` build 标识 →
+`2026-11-23-perf4-pool-window-timeout-health`。
+
 ## 2.5.1 (2026-11-22)
 
 修复「上游流中途失败被吞成裸断连」。对齐 [dsh-connect-trae](https://github.com/dingminhua/dsh-connect-trae) issue #85 的同源教训：200 头已发出后再失败，直接 `res.destroy()` 会让 OpenAI 兼容客户端读到一次可重试的传输故障（`TypeError: terminated`），真实原因全部丢失；限流/凭据类失败还会让调用方拿同一个账号原样重打。
