@@ -136,6 +136,12 @@ window.__ModuleLoader__.load({
       'model.refreshFail': '目录刷新失败：{message}',
       'model.quotaSpent': '额度已用完',
       'model.quotaHint': '标为「额度已用完」的模型，网关会拒绝对它的请求；发出这类请求时会自动回退到 Auto 继续回答。',
+      'model.speed': '输出速度',
+      'model.measureSpeed': '测速',
+      'model.measuring': '测速中…',
+      'model.speedHint': '每个模型跑 3 次取中位数：同一模型单次可能相差数倍，一次测量会把运气当真相。测速按实际生成的 token 数除以生成耗时，不含首字等待。',
+      'model.speedFailed': '无法测速',
+      'model.speedEstimated': '≈',
       'cap.title': '接入能力',
       'cap.note': '以下是插件自身的运行状态，只读。',
       'cap.provider': 'Provider 路由',
@@ -264,6 +270,12 @@ window.__ModuleLoader__.load({
       'model.refreshFail': 'Catalog refresh failed: {message}',
       'model.quotaSpent': 'quota spent',
       'model.quotaHint': 'Models marked "quota spent" are refused by the gateway; a request that lands on one falls back to Auto automatically.',
+      'model.speed': 'Output',
+      'model.measureSpeed': 'Measure',
+      'model.measuring': 'measuring…',
+      'model.speedHint': 'Three runs per model, median. One model can vary several-fold between runs, so a single sample reports luck as truth. Rate = generated tokens / generation span, excluding time to first token.',
+      'model.speedFailed': 'not measured',
+      'model.speedEstimated': '≈',
       'cap.title': 'Integration capabilities',
       'cap.note': 'The plugin\'s own runtime facts, read-only.',
       'cap.provider': 'Provider route',
@@ -829,6 +841,8 @@ window.__ModuleLoader__.load({
       const [panel, setPanel] = React.useState('accounts')
       const [busy, setBusy] = React.useState(false)
       const [catalogBusy, setCatalogBusy] = React.useState(false)
+      const [tps, setTps] = React.useState(undefined)
+      const [tpsBusy, setTpsBusy] = React.useState(false)
       const [catalogNote, setCatalogNote] = React.useState(undefined)
       // Legacy collapsible-card surface keeps its own open state. Declared at
       // the TOP LEVEL on purpose: a hook inside a conditional return branch
@@ -853,6 +867,19 @@ window.__ModuleLoader__.load({
       // Hot-refresh the model catalog: the host re-reads the gateway and
       // re-announces the route, then this page re-reads its provider state so
       // the table shows the fresh rows. No process restart involved.
+      // Speed measurement is separate from the catalog read: it costs real
+      // tokens, so it runs only when the button is pressed.
+      const measureSpeed = () => {
+        setTpsBusy(true)
+        fetch('/plugins/dsh-connect-autoclaw/tps', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        })
+          .then((r) => r.json())
+          .then((r) => { if (r?.ok === true) setTps(r.samples ?? []) })
+          .catch(() => {})
+          .finally(() => setTpsBusy(false))
+      }
+
       const refreshCatalog = () => {
         setCatalogBusy(true)
         setCatalogNote(undefined)
@@ -980,13 +1007,22 @@ window.__ModuleLoader__.load({
           ),
           provider?.catalogUpdatedAt ? h('p', { className: 'dsm-autoclaw-panel-note' }, t('model.updated', { time: stamp(provider.catalogUpdatedAt) })) : null,
           catalogNote !== undefined ? h('p', { className: 'dsm-autoclaw-panel-note dsm-autoclaw-free-quota-warn', role: 'alert' }, t('model.refreshFail', { message: catalogNote })) : null,
+          h('div', { className: 'dsm-autoclaw-accounts-head' },
+            h('span', { className: 'dsm-autoclaw-section-title' }, t('model.speed')),
+            h('button', {
+              type: 'button', className: 'dsm-btn dsm-btn-outline',
+              disabled: tpsBusy === true,
+              onClick: measureSpeed,
+            }, tpsBusy === true ? t('model.measuring') : t('model.measureSpeed')),
+          ),
+          h('p', { className: 'dsm-autoclaw-panel-note' }, t('model.speedHint')),
           catalog.some((row) => row.quotaExhausted === true)
             ? h('p', { className: 'dsm-autoclaw-panel-note dsm-autoclaw-free-quota-warn' }, t('model.quotaHint'))
             : null,
           catalog.length === 0 ? h('p', { className: 'dsm-autoclaw-panel-note' }, t('model.empty')) : null,
           catalog.length > 0 ? h('div', { className: 'dsm-autoclaw-model-table' },
             h('div', { className: 'dsm-autoclaw-model-row dsm-autoclaw-model-row-head', role: 'row' },
-              ...[t('model.name'), t('model.credit'), t('model.context'), t('model.output'), t('model.reasoning'), t('model.vision')].map((label) => h('span', { role: 'columnheader' }, label)),
+              ...[t('model.name'), t('model.credit'), t('model.speed'), t('model.context'), t('model.output'), t('model.reasoning'), t('model.vision')].map((label) => h('span', { role: 'columnheader' }, label)),
             ),
             ...catalog.map((row) => h('div', {
               className: `dsm-autoclaw-model-row${row.quotaExhausted === true ? ' dsm-autoclaw-model-row-spent' : ''}`,
@@ -998,6 +1034,12 @@ window.__ModuleLoader__.load({
                 row.quotaExhausted === true ? h('span', { className: 'dsm-autoclaw-quota-flag' }, t('model.quotaSpent')) : null,
               ),
               h('span', { role: 'cell' }, Number.isFinite(row.creditCostFactor) ? `x${row.creditCostFactor}` : (row.credit || '—')),
+              h('span', { role: 'cell', className: 'dsm-autoclaw-model-num' }, (() => {
+                const sample = Array.isArray(tps) ? tps.find((s) => s.modelId === row.id) : undefined
+                if (sample === undefined) return '—'
+                if (!Number.isFinite(sample.tokensPerSecond)) return t('model.speedFailed')
+                return `${sample.estimated === true ? t('model.speedEstimated') : ''}${Math.round(sample.tokensPerSecond)} tok/s`
+              })()),
               h('span', { role: 'cell', className: 'dsm-autoclaw-model-num' }, row.contextWindow ? credits(row.contextWindow) : '—'),
               h('span', { role: 'cell', className: 'dsm-autoclaw-model-num' }, row.maxTokens ? credits(row.maxTokens) : '—'),
               h('span', { role: 'cell' }, Array.isArray(row.reasoningLevels) ? row.reasoningLevels.join('/') : '—'),

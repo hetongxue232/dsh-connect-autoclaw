@@ -85,6 +85,7 @@ const ACCOUNTS_IMPORT_PATH = '/plugins/dsh-connect-autoclaw/accounts/import'
 const POOL_PATH = '/plugins/dsh-connect-autoclaw/pool'
 const REDEEM_PATH = '/plugins/dsh-connect-autoclaw/accounts/redeem'
 const PROBE_PATH = '/plugins/dsh-connect-autoclaw/probe'
+const TPS_PATH = '/plugins/dsh-connect-autoclaw/tps'
 
 /** The provider route this plugin owns. */
 export const PROVIDER_ID = 'atuoclaw'
@@ -149,7 +150,9 @@ const POINTS_PER_TOTAL_TOKEN = 9.2e-5
 const PROBE_TIMEOUT_MS = 90_000
 
 import { resolveProbeTokens, probeMessages } from './src/probe.js'
+import { TPS_PROBE_RUNS, readTpsRun, summariseTps, tpsProbeRequestBody } from './src/tps.js'
 import { createCatalogAnnouncer, catalogResponseBody } from './src/catalog.js'
+import { createPool, requestWithPool } from './src/upstream-client.js'
 import { annotateCatalog, fallbackChain, isQuotaExhausted, noteQuotaExhausted, pruneQuota } from './src/quota.js'
 import { demotedModels, noteModelOutcome, pruneModelHealth } from './src/model-health.js'
 export { resolveProbeTokens, probeMessages } from './src/probe.js'
@@ -317,7 +320,7 @@ export function apply(ctx, config = {}) {
     catalogUpdatedAt: '',
     // Which build the host actually loaded. Bumped whenever the host half
     // changes, so a running process can be identified without guesswork.
-    build: '2026-11-24-stream-error-restored',
+    build: '2026-11-24-tps',
   }
   // Seeded synchronously: the GUI reads the catalog as soon as the adapter is
   // registered, long before the gateway request below resolves.
@@ -400,6 +403,14 @@ export function apply(ctx, config = {}) {
   // useless — TTFB p50 went 623 ms → 4331 ms at 4 concurrent callers — because
   // every request waited for the previous one's whole response. The window lets
   // independent requests overlap; `rateLimitIntervalMs` still paces dispatch.
+  // The TPS route talks to the gateway directly (not through the shim): it must
+  // not consume the chat lane or be affected by the model fallback logic, or the
+  // measurement would describe the plugin instead of the model.
+  const probePool = createPool()
+  // A speed run is tiny (256 output tokens), so the chat lane's 30 s first-byte
+  // budget is generous here; it bounds a hung gateway without slowing a real run.
+  const firstByteDeadlineMs = 30_000
+
   const limiter = createAccountLimiter({
     maxConcurrentPerAccount: settings.maxConcurrentPerAccount,
     minIntervalMs: Number.isFinite(settings.rateLimitIntervalMs) ? settings.rateLimitIntervalMs : 400,
@@ -448,6 +459,9 @@ export function apply(ctx, config = {}) {
   }
 
   /** All credentials we can serve right now: app dirs + vault imports. */
+  // How many usable accounts exist, so per-account benching can be skipped when
+  // there is nothing to fail over to. Set by the reader below.
+  let accountsKnownOnce = 0
   const readAllCredentials = async (fresh = false) => {
     const accounts = await listAccountsCached(fresh)
     const map = await readAppCredentials(accounts, { accountRoot: settings.accountRoot || undefined })
@@ -456,6 +470,7 @@ export function apply(ctx, config = {}) {
       const imported = await readImportedCredential(account.accountId)
       if (imported !== undefined) map.set(account.accountId, imported)
     }
+    accountsKnownOnce = map.size
     return { accounts, credentials: map }
   }
 
@@ -476,6 +491,11 @@ export function apply(ctx, config = {}) {
   // account that would take the whole provider out of service. A success
   // clears any stale bench.
   const onAccountOutcome = (accountId, outcome) => {
+    // A pool of one cannot fail over. Recording a bench for it only poisons the
+    // next 30 minutes of requests (and survives restarts), so a solo account is
+    // never benched — its failures surface per-request instead. See the
+    // companion guard in accounts.js `pickAccount`.
+    if (accountsKnownOnce <= 1) return
     if (outcome?.kind === 'ok') {
       if (state.probes[accountId]?.ok === false) {
         delete state.probes[accountId]
@@ -781,6 +801,70 @@ export function apply(ctx, config = {}) {
         },
       })
 
+      // OUTPUT SPEED — how fast each model actually writes. A separate probe
+      // from the availability one on purpose: that one sends 25k input and caps
+      // output at a token, so its duration is time-to-first-byte, a different
+      // quantity. Speed needs the opposite shape: tiny input, long output.
+      const disposeTps = webCtx.webServer.register({
+        kind: 'exact',
+        path: TPS_PATH,
+        handler: async (req, res) => {
+          if (!guard(req, res, { methods: ['POST'] })) return
+          try {
+            const body = await readPostBody(req)
+            const requested = Array.isArray(body.models) && body.models.length > 0
+              ? body.models.filter((m) => typeof m === 'string' && m !== '')
+              : catalog().map((row) => row.id)
+            await stateReady
+            const credential = await getAccount({ exclude: [] })
+            if (credential === undefined) {
+              sendJson(res, 200, { ok: false, outcome: 'no-account', message: 'no available account credential' })
+              return
+            }
+            const version = await appVersion({ appVersion: settings.appVersion })
+            const samples = []
+            for (const model of requested) {
+              const runs = []
+              for (let i = 0; i < TPS_PROBE_RUNS; i += 1) {
+                try {
+                  const response = await requestWithPool(
+                    `${settings.baseURL}/autoclaw-proxy/proxy/autoclaw/chat/completions`,
+                    {
+                      pool: probePool,
+                      headers: {
+                        ...signedHeaders(credential.accessToken, { version }),
+                        'content-type': 'application/json',
+                        'X-Authorization': /^Bearer\s+/i.test(credential.accessToken)
+                          ? credential.accessToken
+                          : `Bearer ${credential.accessToken}`,
+                        'X-Request-Model': model,
+                        'X-Client-Type': 'pc',
+                        'X-Agent-Id': 'main',
+                        Accept: 'text/event-stream',
+                      },
+                      body: tpsProbeRequestBody(model, translateRequest),
+                      signal: AbortSignal.timeout(firstByteDeadlineMs),
+                    },
+                  )
+                  if (!response.ok) {
+                    await response.text().catch(() => '')
+                    runs.push(undefined)
+                    continue
+                  }
+                  runs.push(await readTpsRun(response.body))
+                } catch {
+                  runs.push(undefined)
+                }
+              }
+              samples.push(summariseTps(model, runs))
+            }
+            sendJson(res, 200, { ok: true, fetchedAt: new Date().toISOString(), samples })
+          } catch (error) {
+            sendJson(res, 200, { ok: false, message: String(error?.message ?? error) })
+          }
+        },
+      })
+
       // THE ACCOUNT ROSTER: every app account + every imported one, with
       // profile, balance, selection and pool state. Balances cost one
       // upstream read per account, so they are cached for 5 minutes and only
@@ -1079,6 +1163,7 @@ export function apply(ctx, config = {}) {
         disposeLedgers()
         disposeDiag()
         disposeCatalog()
+        disposeTps()
         disposeAccounts()
         disposeSelect()
         disposePool()
