@@ -1,5 +1,60 @@
 # Changelog
 
+## 2.6.1 (2026-11-24)
+
+修复 2.6.0 引入的一个**严重回归**：用户选的模型被静默改写成 Auto。
+
+### 根本原因
+
+2.6.0 给 shim 补上了 `initialModel` 钩子（此前 `shim.js` 一直在调用、`index.js` 从未实现），
+但实现写成了 `chainFor(requested)[0]`。而 `fallbackChain` 的**设计**是把 preferred
+（`zai_auto`）排在最前——所以 `chain[0]` 永远是 Auto：
+
+```
+chainFor('zai_glm-x-preview')
+  = zai_auto -> zai_glm-x-preview -> zai_auto-fast -> ...
+    ^^^^^^^^ 首次尝试被改写成它
+```
+
+后果：**选择器里选任何模型都无效**，请求永远发往 Auto。实测表现为「选 GLM-5.4，
+连发三次，三次都回 `by zai_auto`，GLM-5.4 上游命中 0 次」——而且因为 GLM-5.4
+从未被真正调用，健康记录永远是空的，降权逻辑形同虚设。
+
+### 修复
+
+`initialModel` 只在请求的模型**已被记录为不可用**时才改写：
+
+```js
+initialModel: (requested) => {
+  const unavailable = isQuotaExhausted(state.quota, requested)
+    || demotedModels(state.modelHealth).includes(requested)
+  if (!unavailable) return requested        // 尊重用户选择
+  return chainFor(requested)[0]             // 已知不可用才换
+}
+```
+
+### 修复后的实测（GLM-5.4 对网关返回 429）
+
+| 请求 | GLM-5.4 上游命中 | 结果 |
+|---|---|---|
+| 第 1 次 | **2 次**（两次 429 达阈值 → 降权） | 回退 Auto 返回 200 |
+| 第 2 次 | **0 次** | 直接走 Auto，不再浪费请求 |
+| 第 3 次 | **0 次** | 同上 |
+
+选择器标签正确显示 `zai_glm-x-preview · 暂时不可用`。
+
+### 测试
+
+新增 5 条回归测试（`test/model-health.test.js`）固定该规则：健康的选择不被改写、
+降权的被替换、耗尽的被替换、冷却过期后恢复尊重、preferred 自身直通。
+总计 **115/115**。
+
+### 顺带确认
+
+网关已新增 **GLM-5.4**（id `zai_glm-x-preview`，name `GLM-5.4`，窗口 1,048,576，
+max 307,200，倍率 x2.25）。插件**无需改代码**即可识别——目录不硬编码、窗口直通、
+倍率透传、支持 `?refresh=1` 热刷新，这几项设计在此得到验证。
+
 ## 2.6.0 (2026-11-23)
 
 反代性能四连改。全部基于对**真实上游**的实测，脚本与原始采样随包发布在 `benchmarks/`。

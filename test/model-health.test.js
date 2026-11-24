@@ -11,6 +11,7 @@ import {
   noteModelOutcome,
   pruneModelHealth,
 } from '../src/model-health.js'
+import { isQuotaExhausted, noteQuotaExhausted } from '../src/quota.js'
 
 const OPTS = { threshold: 2, cooldownMs: 1_000, maxCooldownMs: 8_000 }
 
@@ -123,4 +124,57 @@ test('a nonsense threshold falls back to the default instead of demoting on stri
     const second = noteModelOutcome(store, 'm', { kind: 'rate', at: 0 }, opts)
     assert.equal(second.demoted, true, `threshold ${String(bad)}: strike ${DEFAULT_FAILURE_THRESHOLD} does`)
   }
+})
+
+// The `initialModel` gate the host wires to the shim. Kept here as a pure
+// function so the "do not rewrite an explicit choice" rule has a test.
+//
+// Regression: returning `chain[0]` unconditionally made every selection resolve
+// to the preferred model (Auto), because `fallbackChain` always puts preferred
+// first. Observed live as three GLM-5.4 requests answering "by zai_auto" with
+// zero upstream hits on GLM-5.4 — the user's choice never left the process.
+import { fallbackChain } from '../src/quota.js'
+
+const CATALOG = ['zai_auto', 'zai_auto-fast', 'zai_glm-x-preview', 'zai_glm-5.3-flash']
+
+/** Mirrors index.js's initialModel hook. */
+function pickInitial(requested, { quota = {}, health = {}, now = 1_000 } = {}) {
+  if (typeof requested !== 'string' || requested === '') return requested
+  const demoted = demotedModels(health, now)
+  const unavailable = isQuotaExhausted(quota, requested, now) || demoted.includes(requested)
+  if (!unavailable) return requested
+  return fallbackChain({ model: requested, catalog: CATALOG, preferred: 'zai_auto', quota, demoted, now })[0]
+}
+
+test('an explicit healthy choice is NOT rewritten to the preferred model', () => {
+  // This is the bug: any model the user picked came back as zai_auto.
+  assert.equal(pickInitial('zai_glm-x-preview'), 'zai_glm-x-preview')
+  assert.equal(pickInitial('zai_glm-5.3-flash'), 'zai_glm-5.3-flash')
+  assert.equal(pickInitial('zai_auto-fast'), 'zai_auto-fast')
+})
+
+test('a demoted choice is replaced by the chain head', () => {
+  const health = {}
+  noteModelOutcome(health, 'zai_glm-x-preview', { kind: 'rate', at: 0 }, { threshold: 1, cooldownMs: 60_000 })
+  assert.equal(isModelDemoted(health, 'zai_glm-x-preview', 1_000), true)
+  assert.equal(pickInitial('zai_glm-x-preview', { health }), 'zai_auto')
+})
+
+test('an exhausted choice is replaced too', () => {
+  const quota = {}
+  // `now` must be passed through: the verdict is stamped at 1_000, and
+  // `pickInitial` defaults to 1_000 so the TTL has not elapsed.
+  noteQuotaExhausted(quota, 'zai_glm-x-preview', { at: 1_000 })
+  assert.equal(pickInitial('zai_glm-x-preview', { quota, now: 1_500 }), 'zai_auto')
+})
+
+test('a choice whose demotion expired is honoured again', () => {
+  const health = {}
+  noteModelOutcome(health, 'zai_glm-x-preview', { kind: 'rate', at: 0 }, { threshold: 1, cooldownMs: 1_000 })
+  assert.equal(pickInitial('zai_glm-x-preview', { health, now: 5_000 }), 'zai_glm-x-preview')
+})
+
+test('the preferred model itself passing through stays put', () => {
+  assert.equal(pickInitial('zai_auto'), 'zai_auto')
+  assert.equal(pickInitial(''), '')
 })

@@ -317,7 +317,7 @@ export function apply(ctx, config = {}) {
     catalogUpdatedAt: '',
     // Which build the host actually loaded. Bumped whenever the host half
     // changes, so a running process can be identified without guesswork.
-    build: '2026-11-23-perf4-pool-window-timeout-health',
+    build: '2026-11-24-initial-model-fix',
   }
   // Seeded synchronously: the GUI reads the catalog as soon as the adapter is
   // registered, long before the gateway request below resolves.
@@ -534,10 +534,22 @@ export function apply(ctx, config = {}) {
         if (verdict.demoted === true) void persistState()
         return verdict
       },
-      // Before the first attempt: a model already cooling down is replaced by
-      // the chain's first usable entry, so the request never pays a round-trip
-      // the health record can predict.
-      initialModel: (requested) => chainFor(requested)[0],
+      // Before the first attempt: replace the requested model ONLY if the
+      // health record already knows it cannot serve.
+      //
+      // Returning `chainFor(requested)[0]` was a bug: `fallbackChain` always
+      // puts the preferred model (Auto) first, so every explicit choice —
+      // GLM-5.4, GLM-5.3, anything — was silently rewritten to Auto and the
+      // user's selection never reached upstream. Observed as three GLM-5.4
+      // requests answering "by zai_auto" with zero upstream hits on GLM-5.4.
+      initialModel: (requested) => {
+        if (typeof requested !== 'string' || requested === '') return requested
+        const unavailable = isQuotaExhausted(state.quota, requested)
+          || demotedModels(state.modelHealth).includes(requested)
+        if (!unavailable) return requested
+        // It cannot serve: hand back the chain's first entry that can.
+        return chainFor(requested)[0]
+      },
       nextFallback: (attemptModel) => {
         // The shim already failed on the first entry; hand it the next one.
         return chainFor(attemptModel).find((id) => id !== attemptModel)

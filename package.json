@@ -1,6 +1,6 @@
 {
   "name": "dsh-connect-autoclaw",
-  "version": "2.6.0",
+  "version": "2.6.1",
   "private": true,
   "type": "module",
   "description": "把本机 AutoClaw（智谱 zwork）的积分额度接成 DSH 模型 provider：装好即用，无需 Key；macOS/Windows/Linux 三平台 safeStorage 解密；账号池 / 自动换号 / 导入导出 / 兑换码 / 真实体积探针；界面一比一复刻 dsh-connect-trae 与 dsh-connect-workbuddy 的系列骨架。",
