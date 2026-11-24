@@ -107,3 +107,56 @@ test('a request-class probe failure does NOT bench the only account', () => {
   // A legacy record with no kind keeps its old behaviour.
   assert.equal(probeExcludes({ ok: false, at: now - 1000 }, now), true)
 })
+
+test('a solo account is never benched out of service', () => {
+  // Live symptom this fixes: probes[theOnlyAccount] = {ok:false, kind:'server'}
+  // made every request answer `401 no AutoClaw account is available`, which DSH
+  // renders as "API 密钥无效" — for an account whose credential read fine and
+  // whose balance was 11,572 points. A solo pool has nothing to fail over TO,
+  // so benching it only means taking the provider down for the cooldown.
+  const id = 'solo-account'
+  const accounts = [{ accountId: id }]
+  const credentials = new Map([[id, { accountId: id, accessToken: 't' }]])
+  const state = {
+    selectedAccountId: id,
+    poolEnabled: true,
+    probes: { [id]: { ok: false, kind: 'server', status: 500, at: Date.now() } },
+  }
+  const picked = pickAccount({ accounts, credentials, state, balances: new Map(), exclude: [] })
+  assert.equal(picked?.accountId, id, 'the only account must still serve')
+})
+
+test('with a healthy alternative, a benched account is still skipped', () => {
+  const bad = 'acct-bad'
+  const good = 'acct-good'
+  const accounts = [{ accountId: bad }, { accountId: good }]
+  const credentials = new Map([[bad, { accountId: bad }], [good, { accountId: good }]])
+  const state = {
+    selectedAccountId: bad,
+    poolEnabled: true,
+    probes: { [bad]: { ok: false, kind: 'server', status: 500, at: Date.now() } },
+  }
+  const picked = pickAccount({ accounts, credentials, state, balances: new Map(), exclude: [] })
+  assert.equal(picked?.accountId, good, 'cooldown still applies when someone else can serve')
+})
+
+test('an expanded pool is never left empty by benching', () => {
+  // The regression guard for the general rule, not just the solo case: if every
+  // candidate is benched, the healthy list is empty and the pool must fall back
+  // to the known accounts rather than answering "no account".
+  const a = 'a1'
+  const b = 'b1'
+  const accounts = [{ accountId: a }, { accountId: b }]
+  const credentials = new Map([[a, { accountId: a }], [b, { accountId: b }]])
+  const now = Date.now()
+  const state = {
+    selectedAccountId: a,
+    poolEnabled: true,
+    probes: {
+      [a]: { ok: false, kind: 'server', status: 500, at: now },
+      [b]: { ok: false, kind: 'rate', status: 429, at: now },
+    },
+  }
+  const picked = pickAccount({ accounts, credentials, state, balances: new Map(), exclude: [] })
+  assert.ok(picked !== undefined, 'an all-benched pool still serves')
+})

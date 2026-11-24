@@ -286,10 +286,20 @@ export function orderPool(accounts, balances, now = Date.now()) {
  * rules, return the head. Pool OFF: the selected account, or the newest app
  * account when no selection is recorded — never a pool pick.
  */
-export function pickAccount({ accounts, credentials, state, balances, exclude = [] }) {
-  const available = accounts.filter((account) => credentials.has(account.accountId)
-    && !exclude.includes(account.accountId)
-    && !probeExcludes(state.probes?.[account.accountId]))
+export function pickAccount({ accounts, credentials, state, balances, exclude = [], now = Date.now() }) {
+  // An account is a candidate when this request has not already tried it.
+  const known = accounts.filter((account) => credentials.has(account.accountId)
+    && !exclude.includes(account.accountId))
+  // A cooldown is only worth honouring when another account can serve instead.
+  // With ONE account, benching it is indistinguishable from taking the provider
+  // out of service: a single upstream 5xx used to lock the user out for the full
+  // 30-minute cooldown, and a restart could not clear it because the verdict
+  // lives in state.json. Measured live: `probes[account] = {ok:false, kind:'server'}`
+  // made every request answer `401 no AutoClaw account is available`, which DSH
+  // renders as "API 密钥无效" — for an account whose credential was perfectly
+  // readable and whose balance was 11,572 points.
+  const healthy = known.filter((account) => !probeExcludes(state.probes?.[account.accountId], now))
+  const available = healthy.length > 0 ? healthy : known
   if (state.poolEnabled === true) {
     const ordered = orderPool(available, balances)
     return ordered[0] ?? undefined

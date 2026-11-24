@@ -1,5 +1,63 @@
 # Changelog
 
+## 2.6.4 (2026-11-24)
+
+修复「唯一账号被自己 bench 掉」——重启也无法恢复的那种。
+
+### 现象
+
+重启后仍报「API 密钥无效」，错误是：
+
+```
+401 no AutoClaw account is available (install the app and sign in, or import one)
+```
+
+而实际上：凭据可读（`accessToken` 348 字符）、余额 11,572 分、`/status` 返回 `ok:true`。
+
+### 根本原因
+
+`state.json` 里留着一条 probe 记录：
+
+```json
+"probes": {"9b4eb4f2…": {"ok": false, "kind": "server", "status": 500}}
+```
+
+`pickAccount` 用 `probeExcludes` 把它过滤掉，而池里**只有这一个账号**，
+于是 `available` 为空 → `getAccount` 返回 `undefined` → 报 401「无账号」。
+冷却期 **30 分钟**，且判定持久化在 `state.json`，**所以重启也清不掉**。
+
+设计缺陷：单账号时「把它排除」等价于「让 provider 整体停服」。
+一次上游 5xx 就锁死半小时。
+
+### 修复
+
+1. **`pickAccount`**：只有存在其它可用账号时才尊重冷却；
+
+   ```js
+   const healthy = known.filter(a => !probeExcludes(state.probes?.[a.accountId], now))
+   const available = healthy.length > 0 ? healthy : known   // 池全是 bench 时退回 known
+   ```
+
+2. **`onAccountOutcome`**：池里账号数 ≤ 1 时**不记录 bench**——无可换之处，记录只会毒化之后的请求。
+
+### 验证
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| 单账号被 bench | `undefined` → 401「无账号」 | 正常返回该账号 ✅ |
+| 双账号，一个被 bench | 选健康的 | 选健康的（不变）✅ |
+| 全部被 bench | 401 | 仍能服务 ✅ |
+
+### 测试
+
+新增 3 条回归测试（单账号不被 bench、有替代时仍跳过、全 bench 时池不为空）。
+总计 **121/121**。版本 2.6.3 → **2.6.4**，build → `2026-11-24-solo-pool`。
+
+### 操作提示
+
+升级后旧的 probe 记录仍在 `state.json` 里，但新逻辑不会再让它停服；
+如需立即清空：`~/.dsh/atuoclaw-vault/state.json` 的 `probes` 置 `{}`。
+
 ## 2.6.3 (2026-11-24)
 
 修复两个把「网关繁忙」报成「API 密钥无效」的路径。
