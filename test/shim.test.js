@@ -384,3 +384,44 @@ async function fakeGatewayCode(code, message) {
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
   return { server, port: server.address().port }
 }
+
+test('a stream that dies after the 200 headers writes an SSE error frame', async () => {
+  // Regression: this fix shipped in 2.5.1, was lost in a later refactor, and its
+  // absence produced `terminated: other side closed (UND_ERR_SOCKET)` in the UI —
+  // a bare transport fault with the upstream reason erased and no way to tell a
+  // truncation from a network blip. The frame must also NOT append [DONE], which
+  // would assert an answer we know is incomplete.
+  const gateway = await fakeGatewayHalfStream()
+  const shim = await shimAgainst(gateway.port, {
+    onQuotaExhausted: () => {},
+    nextFallback: () => undefined,
+  })
+  try {
+    const response = await chatThrough(shim, 'zai_auto')
+    assert.equal(response.status, 200, 'headers were already sent')
+    const text = await response.text()
+    assert.match(text, /data:\s*\{"error"/, 'an in-band error frame must be present')
+    assert.match(text, /"code":"stream_failed"/)
+    assert.equal(text.includes('[DONE]'), false, 'never claim the answer completed')
+    assert.match(text, /前半段/, 'the partial answer the client already received is kept')
+  } finally {
+    await shim.close()
+    gateway.server.closeAllConnections?.()
+    gateway.server.close()
+  }
+})
+
+/** A gateway that sends half an SSE answer, then kills the socket. */
+async function fakeGatewayHalfStream() {
+  const server = createServer((req, res) => {
+    let raw = ''
+    req.on('data', (c) => { raw += c })
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write('data: {"choices":[{"delta":{"content":"前半段"}}]}\n\n')
+      setTimeout(() => res.destroy(), 80)
+    })
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  return { server, port: server.address().port }
+}

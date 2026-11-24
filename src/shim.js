@@ -206,6 +206,29 @@ function sendJson(res, status, body) {
   res.end(text)
 }
 
+/**
+ * Tell the client a stream died AFTER the 200 headers went out.
+ *
+ * Once headers are committed the status can no longer change, so destroying the
+ * socket is the only way out — and it surfaces to an OpenAI-compatible client as
+ * `terminated: other side closed (UND_ERR_SOCKET)`, a retryable transport fault
+ * with the real reason erased. This writes one SSE error frame instead, which
+ * openai SDKs surface as an APIError carrying the upstream message.
+ *
+ * `[DONE]` is deliberately NOT appended: it asserts "answer complete", the one
+ * thing we know to be false here, and clients that honour it would treat a
+ * truncated turn as finished.
+ */
+function writeStreamError(res, error) {
+  if (res.destroyed || res.writableEnded) return
+  const message = String(error?.message ?? error) || 'upstream stream failed'
+  const payload = JSON.stringify({
+    error: { message, type: 'upstream_error', code: 'stream_failed' },
+  })
+  res.write(`data: ${payload}\n\n`)
+  res.end()
+}
+
 /** An OpenAI-shaped error body, keeping the vendor's own message. */
 function sendOpenAiError(res, status, type, message, code) {
   sendJson(res, status, {
@@ -543,7 +566,11 @@ export function createShim(options = {}) {
               // finished is still a timeout, and the total budget is the cap.
               const onTotal = () => stream.destroy(new Error('total-deadline'))
               attemptDeadline.signal.addEventListener('abort', onTotal, { once: true })
-              stream.on('error', () => { if (!res.destroyed) res.destroy(); resolve() })
+              stream.on('error', (error) => {
+                // Headers are already out: report the failure in-band.
+                writeStreamError(res, error)
+                resolve()
+              })
               stream.on('end', resolve)
               stream.on('close', () => attemptDeadline.signal.removeEventListener('abort', onTotal))
               stream.pipe(res)
@@ -564,7 +591,10 @@ export function createShim(options = {}) {
             const stream = upstream.body
             const onTotal = () => stream.destroy(new Error('total-deadline'))
             attemptDeadline.signal.addEventListener('abort', onTotal, { once: true })
-            stream.on('error', () => { if (!res.destroyed) res.destroy(); resolve() })
+            stream.on('error', (error) => {
+              writeStreamError(res, error)
+              resolve()
+            })
             stream.on('end', resolve)
             stream.on('close', () => attemptDeadline.signal.removeEventListener('abort', onTotal))
             stream.pipe(res)

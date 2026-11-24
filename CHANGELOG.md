@@ -1,5 +1,73 @@
 # Changelog
 
+## 2.6.5 (2026-11-24)
+
+恢复 2.5.1 的「流中途失败写 SSE error 帧」——该修复在远端网页编辑器的重构
+（`29da8fd`）中被删除，导致 UI 显示裸断连。
+
+### 现象
+
+```
+已重试模型请求 (3/5) · 2s
+重试延迟: 1911 毫秒
+失败原因: terminated: other side closed (UND_ERR_SOCKET)
+```
+
+没有模型名、没有上游原因、无法判断是截断还是网络抖动，重试 3 次仍是同一句。
+
+### 根本原因
+
+`git log -S'writeStreamError'` 显示：2.5.1 引入（`826d986` 中存在），
+后被 `29da8fd Refactor shim.js for improved error handling and performance` 删除。
+当前代码在流错误时直接 `res.destroy()`：
+
+```js
+stream.on('error', () => { if (!res.destroyed) res.destroy(); resolve() })
+```
+
+200 头已提交后再 destroy，OpenAI 兼容客户端只能读到传输层故障，真实原因全部丢失。
+
+### 修复
+
+恢复 `writeStreamError()`，在两条 pipe 的错误分支写一条 SSE 错误帧：
+
+```
+data: {"error":{"message":"<上游原因>","type":"upstream_error","code":"stream_failed"}}
+```
+
+**刻意不追加 `[DONE]`**：它断言「回答已完成」，是本路径唯一确知为假的事；
+只看哨兵的客户端会把截断的轮次当成完整。
+
+### 验证
+
+假网关发半个 SSE 后毁掉 socket：
+
+| 项 | 修复前 | 修复后 |
+|---|---|---|
+| 客户端看到 | `UND_ERR_SOCKET` | `200` + error 帧 |
+| 上游原因 | 丢失 | 保留 |
+| `[DONE]` | — | **不写**（正确） |
+| 已收到的部分正文 | 丢失 | 保留 |
+
+### 附：关于「tok 太慢」的实测
+
+同一 shim、同一提示词多次采样（`zai_auto` / `zai_glm-5.3-flash` 各 3 次）：
+
+| 模型 | 生成耗时 | 速度 |
+|---|---|---|
+| zai_auto | 4.1 / 15.2 / 7.6 s | 44.7 / 12.7 / 26.6 c/s |
+| zai_glm-5.3-flash | 4.6 / 5.7 / 10.5 s | 37.6 / 43.2 / 19.9 c/s |
+
+**同一模型三次差 3.5 倍**，是上游波动而非插件瓶颈。绕过 shim 直连上游反而更慢
+（39.8 / 9.5 c/s），排除插件。思考档 `low` vs `max` 对吞吐无实质影响
+（28.3 vs 28.4 c/s），但思考内容占生成量的 60–70%，所以体感慢主要来自思考 token。
+
+### 测试
+
+新增 1 条回归测试（断言 error 帧存在、`stream_failed` 正确、**无** `[DONE]`、
+已收到的正文保留）。总计 **122/122**。版本 2.6.4 → **2.6.5**，
+build → `2026-11-24-stream-error-restored`。
+
 ## 2.6.4 (2026-11-24)
 
 修复「唯一账号被自己 bench 掉」——重启也无法恢复的那种。
