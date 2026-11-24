@@ -1,5 +1,54 @@
 # Changelog
 
+## 2.6.2 (2026-11-24)
+
+修复「额度用完」被显示成「API 密钥无效」。
+
+### 根本原因
+
+DSH 的 `classifyPiAiError` 用正则从**错误消息**里抓 `401|403` 判为 `AUTH`：
+
+```js
+const LEADING_HTTP_STATUS = /^[45]\d\d\b/
+if (/\b(?:401|403)\b/.test(statusSource)) return "AUTH"   // → UI「API 密钥无效」
+```
+
+而 AutoClaw 对额度耗尽正是返回 **403** + `{"code":810000,"message":"…额度已用完…"}`。
+插件原样透传 403，于是 DSH 判成 AUTH，用户看到「API 密钥无效」——真正原因是
+GLM-5.4 的免费额度用完了。
+
+雪上加霜：DSH 的 `isQuotaExceededError` 只认英文关键词
+（`insufficient quota` / `quota exceeded` 等），上游消息是中文，一条也匹配不上，
+所以连兜底都失败了。
+
+### 修复
+
+额度类失败改答 **402（Payment Required）**，并在消息前加英文 quota 关键词：
+
+```
+HTTP 402
+{"error":{"type":"insufficient_quota",
+          "message":"insufficient quota: quota exhausted for model zai_glm-x-preview —— …"}}
+```
+
+- 402 语义正确，且不含触发误判的 `401/403` 字面量；
+- 英文关键词让 `isQuotaExceededError` 命中，DSH 分类为 `QUOTA`；
+- 中文原文完整保留在消息尾部，用户仍能看到上游原话。
+
+### 验证
+
+| 项 | 修复前 | 修复后 |
+|---|---|---|
+| HTTP 状态 | 403 | **402** |
+| DSH 分类 | `AUTH` → 「API 密钥无效」 | **`QUOTA`** |
+| 消息 | 仅中文 | 含 `insufficient quota` |
+
+### 测试
+
+新增回归测试断言三点：状态必须是 402 而非 403、type 为 `insufficient_quota`、
+消息含英文关键词且**不以 401/403 开头**。旧测试中把 403 写死的断言同步更新。
+总计 **116/116**。
+
 ## 2.6.1 (2026-11-24)
 
 修复 2.6.0 引入的一个**严重回归**：用户选的模型被静默改写成 Auto。

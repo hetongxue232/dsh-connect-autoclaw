@@ -600,7 +600,28 @@ export function createShim(options = {}) {
               // between "the plugin is broken" and "switch models or top up".
               ? `（${translated.model} 的额度已用完，自动回退也没有可用模型——换一个模型，或为该模型开通会员；这不是插件故障）`
               : ''
-          sendOpenAiError(res, upstream.status, upstream.status === 406 ? 'prompt_gate' : 'upstream_error', `${hint}${text}`.trim() || `HTTP ${upstream.status}`)
+          // QUOTA answers 402, not the upstream's 403.
+          //
+          // DSH classifies a failure by regexing the MESSAGE for 401/403 and
+          // calling it AUTH, which renders as "API 密钥无效". An AutoClaw
+          // allowance failure is 403 + {"code":810000,"message":"…额度已用完…"},
+          // so the user was told their key was invalid while the real cause was
+          // a spent model quota. 402 (Payment Required) is the correct status
+          // for it, and it carries none of the 401/403 tokens that trigger the
+          // misclassification. The English phrase is added because DSH's
+          // isQuotaExceededError only recognises English keywords and the
+          // upstream message is Chinese, so without it the quota case still
+          // falls through to a generic SERVER/upstream error.
+          const isQuota = kind === 'quota'
+          const quotaMessage = isQuota
+            ? `insufficient quota: quota exhausted for model ${translated.model} —— ${`${hint}${text}`.trim()}`
+            : `${hint}${text}`.trim()
+          sendOpenAiError(
+            res,
+            isQuota ? 402 : upstream.status,
+            upstream.status === 406 ? 'prompt_gate' : isQuota ? 'insufficient_quota' : 'upstream_error',
+            quotaMessage || `HTTP ${upstream.status}`,
+          )
           return
         }
         // Failoverable: the loop picks the next account (the pool excludes `tried`).

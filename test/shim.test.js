@@ -165,7 +165,9 @@ test('with no usable fallback the request fails and names the model', async () =
   try {
     const response = await chatThrough(shim, 'zaicoding_glm-5.3')
     const body = await response.json()
-    assert.equal(response.status, 403)
+    // 402, not the upstream's 403: see the dedicated regression test below for
+    // why passing 403 through made DSH render it as "API 密钥无效".
+    assert.equal(response.status, 402)
     assert.ok(body.error.message.includes('zaicoding_glm-5.3'))
     assert.ok(body.error.message.includes('额度已用完'))
   } finally {
@@ -275,3 +277,47 @@ test('initialModel returning the same id changes nothing', async () => {
     gateway.server.close()
   }
 })
+
+test('a spent allowance answers 402, not the upstream 403 that reads as AUTH', async () => {
+  // DSH classifies a model failure by regexing the MESSAGE for 401/403 and
+  // calling it AUTH, which the UI renders as "API 密钥无效". AutoClaw reports a
+  // spent model quota as 403 + {"code":810000,"message":"…额度已用完…"}, so
+  // passing that status through told the user their key was invalid while the
+  // real cause was quota. 402 (Payment Required) is the honest status and
+  // carries none of the tokens that trigger the misclassification.
+  const gateway = await fakeGatewayQuota()
+  const shim = await shimAgainst(gateway.port, {
+    onQuotaExhausted: () => {},
+    nextFallback: () => undefined, // no fallback: the raw failure must surface
+  })
+  try {
+    const response = await chatThrough(shim, 'zai_glm-x-preview')
+    const body = await response.json()
+    assert.equal(response.status, 402, 'not 403')
+    assert.equal(body.error.type, 'insufficient_quota')
+    // The English keyword DSH's isQuotaExceededError looks for, since the
+    // gateway's own sentence is Chinese and matches nothing.
+    assert.match(body.error.message, /insufficient[\s_-]+quota/i)
+    // The token that would make DSH say AUTH must not lead the message.
+    const leading = /^[45]\d\d\b/.exec(body.error.message)?.[0]
+    assert.notEqual(leading, '403')
+    assert.equal(/\b(?:401|403)\b/.test(leading ?? body.error.message), false)
+  } finally {
+    await shim.close()
+    gateway.server.close()
+  }
+})
+
+/** A gateway that answers every call with AutoClaw's spent-allowance shape. */
+async function fakeGatewayQuota() {
+  const server = createServer((req, res) => {
+    let raw = ''
+    req.on('data', (c) => { raw += c })
+    req.on('end', () => {
+      res.writeHead(403, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ code: 810000, message: 'GLM-5.4 免费额度已用完,开通连续包月会员继续使用' }))
+    })
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  return { server, port: server.address().port }
+}
