@@ -317,7 +317,7 @@ export function apply(ctx, config = {}) {
     catalogUpdatedAt: '',
     // Which build the host actually loaded. Bumped whenever the host half
     // changes, so a running process can be identified without guesswork.
-    build: '2026-11-24-quota-402',
+    build: '2026-11-24-overload-and-pool',
   }
   // Seeded synchronously: the GUI reads the catalog as soon as the adapter is
   // registered, long before the gateway request below resolves.

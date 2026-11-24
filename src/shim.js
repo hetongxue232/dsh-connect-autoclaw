@@ -181,8 +181,16 @@ export function classifyFailure(status, body) {
   const code = codeMatch === null ? undefined : Number(codeMatch[1])
   if (code === 401001 || code === 410000) return 'credential'
   if (code === 810000) return 'quota'
+  // 810001 is AutoClaw's overload/priority answer ("当前使用人数较多，系统繁忙，
+  // 请稍后重试，或升级为连续包月会员"). It arrives as 403 like a quota failure,
+  // but it is transient back-pressure: another account, or the same one a moment
+  // later, can serve it. Classifying it as 'request' — the previous behaviour —
+  // made it non-failoverable, so a busy gateway was reported as a permanent
+  // failure and DSH rendered the 403 as "API 密钥无效".
+  if (code === 810001) return 'rate'
   if (code === 810002) return 'rate'
   if (status === 401) return 'credential'
+  if (status === 403) return 'credential'
   if (status >= 500) return 'server'
   return 'request'
 }
@@ -380,6 +388,12 @@ export function createShim(options = {}) {
     // account left", which the plain failover loop below cannot do.
     let refreshedFor = undefined // accountId already force-refreshed this request
     let pinned = undefined // credential carrying the refreshed token
+    // The last real upstream answer, so a single-account pool can report WHY it
+    // ran out instead of inventing an authentication error. Without this, one
+    // busy-model failure made the next iteration answer `401 no further AutoClaw
+    // account after 1 failure(s)` — which DSH classifies as AUTH and shows as
+    // "API 密钥无效", hiding a plain 810001.
+    let lastFailure = undefined // { status, type, message }
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
       let credential
       try {
@@ -393,6 +407,24 @@ export function createShim(options = {}) {
         return
       }
       if (credential === undefined || typeof credential.accessToken !== 'string' || credential.accessToken === '') {
+        // A pool that ran dry after a real failure must repeat that failure, not
+        // replace it with an auth error. Only a pool that never had an account
+        // to begin with is a genuine "sign in" case.
+        if (lastFailure !== undefined) {
+          const isQuota = lastFailure.kind === 'quota'
+          const isOverload = lastFailure.kind === 'rate'
+          sendOpenAiError(
+            res,
+            isQuota ? 402 : isOverload ? 503 : lastFailure.status,
+            isQuota ? 'insufficient_quota' : isOverload ? 'upstream_overloaded' : 'upstream_error',
+            isQuota
+              ? `insufficient quota: quota exhausted for model ${translated.model} —— ${lastFailure.text.slice(0, 200)}`
+              : isOverload
+                ? `upstream overloaded (rate limited): ${lastFailure.text.slice(0, 200)}`
+                : lastFailure.text.slice(0, 400) || `HTTP ${lastFailure.status}`,
+          )
+          return
+        }
         sendOpenAiError(res, 401, 'authentication_error', tried.length === 0
           ? 'no AutoClaw account is available (install the app and sign in, or import one)'
           : `no further AutoClaw account after ${tried.length} failure(s): ${tried.join(', ')}`)
@@ -542,6 +574,7 @@ export function createShim(options = {}) {
 
         const text = await upstream.text().catch(() => '')
         const kind = classifyFailure(upstream.status, text)
+        lastFailure = { status: upstream.status, kind, text }
         options.onAccountOutcome?.(credential.accountId, {
           kind, status: upstream.status, message: text.slice(0, 200),
         })
@@ -612,15 +645,25 @@ export function createShim(options = {}) {
           // isQuotaExceededError only recognises English keywords and the
           // upstream message is Chinese, so without it the quota case still
           // falls through to a generic SERVER/upstream error.
+          // 810001 (busy) is back-pressure, not authorization: answer 503 so
+          // DSH never sees the 403 that it maps to AUTH, and so the caller's
+          // retry policy treats it as retryable.
+          const isOverload = kind === 'rate' && upstream.status === 403
           const isQuota = kind === 'quota'
           const quotaMessage = isQuota
             ? `insufficient quota: quota exhausted for model ${translated.model} —— ${`${hint}${text}`.trim()}`
             : `${hint}${text}`.trim()
           sendOpenAiError(
             res,
-            isQuota ? 402 : upstream.status,
-            upstream.status === 406 ? 'prompt_gate' : isQuota ? 'insufficient_quota' : 'upstream_error',
-            quotaMessage || `HTTP ${upstream.status}`,
+            isQuota ? 402 : isOverload ? 503 : upstream.status,
+            upstream.status === 406
+              ? 'prompt_gate'
+              : isQuota ? 'insufficient_quota'
+              : isOverload ? 'upstream_overloaded'
+              : 'upstream_error',
+            isOverload
+              ? `upstream overloaded (rate limited): ${`${hint}${text}`.trim()}`
+              : quotaMessage || `HTTP ${upstream.status}`,
           )
           return
         }

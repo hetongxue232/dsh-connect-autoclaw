@@ -321,3 +321,66 @@ async function fakeGatewayQuota() {
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
   return { server, port: server.address().port }
 }
+
+test('810001 (gateway busy) answers 503, not the 403 that reads as AUTH', async () => {
+  // 810001 is AutoClaw's overload answer ("当前使用人数较多，系统繁忙"). It arrives
+  // as 403 like a quota failure, so passing the status through made DSH classify
+  // it AUTH and show "API 密钥无效" for a merely busy gateway. It is also
+  // transient, so it must be classified 'rate' and stay failoverable.
+  const { classifyFailure, isFailoverable } = await import('../src/shim.js')
+  assert.equal(classifyFailure(403, '{"code":810001,"message":"系统繁忙"}'), 'rate')
+  assert.equal(isFailoverable('rate'), true)
+
+  const gw = await fakeGatewayCode(810001, '当前使用人数较多，系统繁忙')
+  const shim = await shimAgainst(gw.port, { onQuotaExhausted: () => {}, nextFallback: () => undefined })
+  try {
+    const response = await chatThrough(shim, 'zai_glm-x-preview')
+    const body = await response.json()
+    assert.equal(response.status, 503)
+    assert.equal(body.error.type, 'upstream_overloaded')
+    const leading = /^[45]\d\d\b/.exec(body.error.message)?.[0]
+    assert.notEqual(leading, '403')
+    assert.match(body.error.message, /rate.?limit/i)
+  } finally {
+    await shim.close()
+    gw.server.close()
+  }
+})
+
+test('a single-account pool repeats the real failure instead of inventing 401', async () => {
+  // With one account, the failover loop excludes it after the first failure, so
+  // the next iteration found nothing and reported `401 no further AutoClaw
+  // account`. DSH reads that as AUTH and shows "API 密钥无效", hiding the actual
+  // 810001. The pool running dry must repeat the upstream answer.
+  const gw = await fakeGatewayCode(810001, '当前使用人数较多，系统繁忙')
+  const one = { accountId: 'solo', accessToken: 'Bearer t', refreshToken: 'r' }
+  const shim = await shimAgainst(gw.port, {
+    getAccount: async ({ exclude = [] } = {}) => (exclude.includes('solo') ? undefined : one),
+    onQuotaExhausted: () => {},
+    nextFallback: () => undefined,
+  })
+  try {
+    const response = await chatThrough(shim, 'zai_glm-x-preview')
+    const body = await response.json()
+    assert.equal(response.status, 503, 'the real failure, not 401')
+    assert.equal(body.error.type, 'upstream_overloaded')
+    assert.equal(/no further AutoClaw account/.test(body.error.message), false)
+  } finally {
+    await shim.close()
+    gw.server.close()
+  }
+})
+
+/** A gateway answering every call with one AutoClaw error code. */
+async function fakeGatewayCode(code, message) {
+  const server = createServer((req, res) => {
+    let raw = ''
+    req.on('data', (c) => { raw += c })
+    req.on('end', () => {
+      res.writeHead(403, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ code, message }))
+    })
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  return { server, port: server.address().port }
+}
